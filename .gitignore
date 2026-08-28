@@ -1,0 +1,28 @@
+# 赛题数据仅用于本次评测，不得再分发（见官方参赛规则），故不纳入版本库
+data/PatientPheX-V1-A/
+data/*.zip
+data/**/*.jsonl
+data/**/*.obo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 模型与产物
+*.ckpt
+*.pt
+*.bin
+*.safetensors
+outputs/
+runs/
+submissions/
+pred_*.jsonl
+submit*.jsonl
+
+# 编辑器/系统
+.idea/
+.vscode/
+.DS_Store
