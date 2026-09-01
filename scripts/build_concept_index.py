@@ -140,7 +140,9 @@ def main():
     with torch.no_grad():
         for i in range(0, len(names), bs):
             batch = names[i:i + bs]
-            toks = tok.batch_encode_plus(
+            # 直接调用 tokenizer（__call__）是官方现推荐写法，等价于旧的
+            # batch_encode_plus，且兼容新版 transformers（旧方法名已移除）
+            toks = tok(
                 batch, padding=True, truncation=True,
                 max_length=args.max_length, return_tensors="pt")
             toks = {k: v.to(device) for k, v in toks.items()}  # 输入也要搬上卡
