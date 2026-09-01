@@ -18,7 +18,7 @@ baseline_sapbert.py —— 「SapBERT 提召回」方案第 2 步：在词典基
   候选 span 的边界严格落在与词典同一套 TOKEN_RE=[A-Za-z0-9]+ 的词元边界上，
   所以 SapBERT 补的实体 offset/length 与金标准口径一致，能真正算 TP。
 
-GPU 纪律：全程用 GPU，检测��到 CUDA 直接报错退出，绝不静默退回 CPU。
+GPU 纪律：全程用 GPU，检测不到 CUDA 直接报错退出，绝不静默退回 CPU。
 
 用法（项目根目录、GPU 正常开机、已跑过 build_concept_index.py）：
   # 单一阈值：生成 dev 预测
