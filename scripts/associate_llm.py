@@ -1,0 +1,306 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+associate_llm.py —— 子任务 2「患者-表型归属」的 LLM 后处理器（官方基线：Qwen3-8B）。
+
+它做什么（以及不做什么）：
+  * 只重算 association（谁得哪些表型），**不碰识别**——entities 原样来自子任务 1 的预测。
+  * 用本地 Qwen3-8B 逐篇判断：每个已识别的表型 mention「属于哪个患者 / 不属于任何人(NONE)」。
+
+为什么要它（病根，已用 train 量化）：
+  现基线 baseline_dict.associate() 把每个表型按 offset 就近**强挂**给最近患者（关联率 100%），
+  但 train 上真正进入某患者 gold 关联的表型中位仅 ~58%——约 42% 是疾病背景/方法/别的队列/
+  阴性描述，本不该挂给任何人。SapBERT 多召回的表型被 100% 强挂，全成了子任务 2 的 FP。
+  让 LLM 能回答「NONE（不属于任何列出的个体）」，就能砍掉这 ~42% 过度关联。
+  多患者文档（占 55%）里「挂给谁」本身也交给 LLM 判（如家系：proband vs 祖父/姑姑）。
+
+数据流（按 pmc_id join 两个文件）：
+    --input  题目版 jsonl（出 patient[] 与 full_text[]，用来做患者名册与上下文/章节）
+    --pred   子任务1 预测 jsonl（出 entities[]，即识别结果）
+    --out    输出 jsonl：entities 原样 + LLM 重算的 association
+  输出格式对齐 evaluate.py 的 patient_pheno_map 读法。
+
+鲁棒性：某篇 LLM 输出整体无法解析 → 该篇回退 baseline_dict.associate() 贪心结果
+        （--no-fallback 可关）。所以**永不比现基线更差**。缺某序号 → 保守判 NONE。
+
+GPU 纪律：本项目全程用 GPU。检测不到 CUDA 直接报错退出，绝不静默退回 CPU。
+         Qwen3-8B bf16 ≈16GB，4090 的 23.5GB 放得下，**需整卡开机（非无卡模式）**。
+
+用法（项目根目录、GPU 正常开机）：
+    # 冒烟：先跑 2 篇，肉眼核对 prompt/输出
+    python scripts/associate_llm.py \
+        --input data/split/dev_input.jsonl \
+        --pred  pred_dev_sapbert.jsonl \
+        --out   pred_dev_llm.jsonl \
+        --limit-docs 2 --show-prompt
+
+    # dev 全量 + 顺便打子任务2分数（对照 sapbert_v1: micF1=0.4310 macF1=0.4030）
+    python scripts/associate_llm.py \
+        --input data/split/dev_input.jsonl \
+        --pred  pred_dev_sapbert.jsonl \
+        --out   pred_dev_llm.jsonl \
+        --gold  data/split/dev.jsonl
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import time
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
+
+# 复用词典基线里已验证的工具：全局文本重建 / 患者锚点 / 就近归属(兜底)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from baseline_dict import build_global, patient_anchors, associate  # noqa: E402
+
+MODEL_NAME = "Qwen/Qwen3-8B"
+# 解析 LLM 每行 "序号: 患者ID/NONE"。允许 ':' 或 '.' 或 ')' 作分隔，容忍前导空白/编号符
+LINE_RE = re.compile(r"^\s*[#\-\*]?\s*(\d+)\s*[:\.\)]\s*([A-Za-z0-9_\-]+)")
+
+
+# ----------------------------- 章节定位 -----------------------------
+
+def section_index(full_text):
+    """把 full_text 段落变成按 offset 排序的区间表 [(start, end, section_type)]。
+       每段覆盖 [offset, offset+len(text))；用来查某表型 mention 落在哪个章节。"""
+    idx = []
+    for s in full_text or []:
+        o = s.get("offset", 0)
+        t = s.get("text", "")
+        idx.append((o, o + len(t), s.get("section_type") or s.get("type") or "?"))
+    idx.sort(key=lambda x: x[0])
+    return idx
+
+
+def section_of(offset, sec_idx):
+    """二分/线性查 offset 落在哪个章节（段不重叠，线性足够快，篇内段数~几十）。"""
+    for a, b, st in sec_idx:
+        if a <= offset < b:
+            return st
+    return "?"
+
+
+# ----------------------------- 患者名册 -----------------------------
+
+def patient_roster(doc):
+    """返回 [(patient_id, 代表描述)]，代表描述取该患者最长的 mention 文本（信息量最大）。"""
+    out = []
+    for p in doc.get("patient", []):
+        ms = p.get("mention", [])
+        rep = ""
+        if ms:
+            rep = max((m.get("text", "") for m in ms), key=len)
+        out.append((p["patient_id"], rep))
+    return out
+
+
+# ----------------------------- Prompt 组装 -----------------------------
+
+def build_prompt(doc, entities, global_text, sec_idx, window):
+    """为一篇文档组 prompt。返回 (prompt_str, valid_pids:set)。
+       表型清单里每个实体给：序号 + 所在章节 + mention 文本 + ±window 字符上下文。"""
+    roster = patient_roster(doc)
+    valid_pids = {pid for pid, _ in roster}
+
+    lines = []
+    lines.append(
+        "You are a clinical NLP expert. A biomedical case report mentions one or more "
+        "individuals (patients / relatives). Below is the roster of individuals, then a "
+        "numbered list of phenotype mentions found in the text (each with its section and "
+        "surrounding context).")
+    lines.append("")
+    lines.append("For EACH numbered phenotype, decide which individual it describes, and "
+                 "answer with that individual's ID. If the phenotype does NOT belong to any "
+                 "listed individual — e.g. it is general disease background, a definition, a "
+                 "method, another cohort/reference, or the text says it is normal/absent/ruled "
+                 "out for the patient — answer NONE.")
+    lines.append("")
+    lines.append("Individuals:")
+    for pid, rep in roster:
+        rep = " ".join(rep.split())
+        lines.append('  %s = "%s"' % (pid, rep[:120]))
+    lines.append("")
+    lines.append("Phenotype mentions:")
+    for i, e in enumerate(entities, 1):
+        off = e.get("offset", 0)
+        length = e.get("length", 0)
+        st = section_of(off, sec_idx)
+        left = max(0, off - window)
+        right = min(len(global_text), off + length + window)
+        ctx = " ".join(global_text[left:right].split())
+        men = " ".join((e.get("text") or "").split())
+        lines.append('  %d. [%s] "%s" | context: ...%s...' % (i, st, men, ctx))
+    lines.append("")
+    lines.append("Output EXACTLY one line per phenotype, in the form:")
+    lines.append("<number>: <individual ID or NONE>")
+    lines.append("No explanations, no extra text. Example:")
+    lines.append("1: %s" % (roster[0][0] if roster else "O1"))
+    lines.append("2: NONE")
+    return "\n".join(lines), valid_pids
+
+
+# ----------------------------- 输出解析 + 聚合 -----------------------------
+
+def parse_assignments(resp, n_ent, valid_pids):
+    """解析 LLM 回复为 {序号(1基): patient_id}。NONE / 未知ID / 缺行 都不入表（即判 NONE）。
+       返回 (assign:dict, n_parsed:int)。n_parsed=解析到的合法行数（判 fallback 用）。"""
+    assign = {}
+    n_parsed = 0
+    for raw in resp.splitlines():
+        m = LINE_RE.match(raw)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        val = m.group(2)
+        if idx < 1 or idx > n_ent:
+            continue
+        n_parsed += 1
+        if val in valid_pids:               # 只有命中真实患者ID才算归属；NONE/编造ID → 丢弃
+            assign[idx] = val
+    return assign, n_parsed
+
+
+def assoc_from_assignments(entities, assign, valid_pids):
+    """按 {序号: pid} 把实体 identifier 聚到各患者，去重。返回 association 列表。"""
+    bucket = {pid: [] for pid in valid_pids}
+    for i, e in enumerate(entities, 1):
+        pid = assign.get(i)
+        if pid is None:
+            continue                        # 判 NONE：不挂给任何人
+        ident = e.get("identifier")
+        if ident is None:
+            continue
+        if ident not in bucket[pid]:        # 按 patient_id 去重（与 baseline 口径一致）
+            bucket[pid].append(ident)
+    return [{"patient_id": pid, "phenotype": phs} for pid, phs in bucket.items()]
+
+
+# ----------------------------- 主流程 -----------------------------
+
+def main():
+    ap = argparse.ArgumentParser(description="Qwen3-8B 患者-表型归属后处理器")
+    ap.add_argument("--input", required=True, help="题目版 jsonl（出 patient/full_text）")
+    ap.add_argument("--pred", required=True, help="子任务1 预测 jsonl（出 entities）")
+    ap.add_argument("--out", required=True, help="输出预测 jsonl")
+    ap.add_argument("--model", default=MODEL_NAME, help="HuggingFace 模型 id")
+    ap.add_argument("--gold", help="金标准 jsonl；传了就顺便打分")
+    ap.add_argument("--context-window", type=int, default=120, help="mention 左右各取多少字符上下文")
+    ap.add_argument("--max-new-tokens", type=int, default=0, help="生成上限；0=按实体数自动(n*8+64)")
+    ap.add_argument("--think", action="store_true", help="开 Qwen3 思考模式（更准但慢很多、更耗卡时）")
+    ap.add_argument("--no-fallback", action="store_true", help="解析失败也不回退就近归属（默认回退）")
+    ap.add_argument("--limit-docs", type=int, default=0, help="只处理前 N 篇（冒烟用）；0=全量")
+    ap.add_argument("--show-prompt", action="store_true", help="打印首篇 prompt 与回复，便于核对")
+    args = ap.parse_args()
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    # —— GPU 硬检查：本项目全程用 GPU，检测不到就报错退出 ——
+    if not torch.cuda.is_available():
+        print("❌ 未检测到 GPU（torch.cuda.is_available()=False）。本项目全程用 GPU，已中止。")
+        print("   先跑 `python scripts/gpu_check.py` 排查；本脚本需整卡开机（非无卡模式）。")
+        sys.exit(2)
+    device = torch.device("cuda:0")
+    print("使用 GPU :", torch.cuda.get_device_name(0))
+
+    # 读两个文件并按 pmc_id join
+    inputs = [json.loads(l) for l in open(args.input, encoding="utf-8") if l.strip()]
+    preds = [json.loads(l) for l in open(args.pred, encoding="utf-8") if l.strip()]
+    pred_by_pmc = {d["pmc_id"]: d for d in preds}
+    if args.limit_docs:
+        inputs = inputs[:args.limit_docs]
+    print("输入 %d 篇；预测文件覆盖 %d 篇" % (len(inputs), len(pred_by_pmc)))
+
+    # 加载 Qwen3-8B
+    print("加载 %s ...（首次会下载约 16GB，先 `source /etc/network_turbo` 开学术加速）" % args.model)
+    tok = AutoTokenizer.from_pretrained(args.model)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, torch_dtype=torch.bfloat16).to(device).eval()
+    print("  思考模式:", "开" if args.think else "关（默认，贪心解码，可复现且快）")
+
+    out_docs = []
+    n_llm = n_fallback = 0
+    n_none = n_assigned = 0
+    t0 = time.perf_counter()
+
+    for di, d in enumerate(inputs):
+        pmc = d["pmc_id"]
+        pred = pred_by_pmc.get(pmc)
+        entities = (pred or {}).get("entities", []) if pred else []
+        G = build_global(d.get("full_text", []))
+        sec_idx = section_index(d.get("full_text", []))
+
+        # 无患者 → association 空；无实体 → 各患者空
+        roster_pids = [p["patient_id"] for p in d.get("patient", [])]
+        if not roster_pids:
+            assoc = []
+        elif not entities:
+            assoc = [{"patient_id": pid, "phenotype": []} for pid in roster_pids]
+        else:
+            prompt, valid_pids = build_prompt(d, entities, G, sec_idx, args.context_window)
+            mnt = args.max_new_tokens or (len(entities) * 8 + 64)
+
+            messages = [{"role": "user", "content": prompt}]
+            text = tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=args.think)
+            enc = tok([text], return_tensors="pt").to(device)
+            with torch.no_grad():
+                gen = model.generate(
+                    **enc, max_new_tokens=mnt, do_sample=False,
+                    pad_token_id=tok.eos_token_id)
+            resp = tok.decode(gen[0][enc.input_ids.shape[1]:], skip_special_tokens=True)
+            # 思考模式下剥掉 <think>...</think>，只留最终答案
+            if "</think>" in resp:
+                resp = resp.split("</think>", 1)[1]
+
+            if args.show_prompt and di == 0:
+                print("\n----- 首篇 PROMPT -----\n%s" % prompt)
+                print("\n----- 首篇 回复 -----\n%s\n" % resp.strip())
+
+            assign, n_parsed = parse_assignments(resp, len(entities), valid_pids)
+            if n_parsed == 0 and not args.no_fallback:
+                # 整体没解析出任何合法行 → 回退就近归属，绝不比现基线差
+                assoc = associate(d, entities)
+                n_fallback += 1
+            else:
+                assoc = assoc_from_assignments(entities, assign, valid_pids)
+                n_llm += 1
+                n_assigned += len(assign)
+                n_none += (len(entities) - len(assign))
+
+        out_docs.append({
+            "pmc_id": pmc, "pmid": d.get("pmid"),
+            "entities": entities, "association": assoc,
+        })
+        if (di + 1) % 5 == 0 or di + 1 == len(inputs):
+            print("  已处理 %d/%d 篇   用时 %.0f 秒" % (di + 1, len(inputs), time.perf_counter() - t0))
+
+    with open(args.out, "w", encoding="utf-8") as f:
+        for d in out_docs:
+            f.write(json.dumps(d, ensure_ascii=False) + "\n")
+    print("\n已写出: %s" % args.out)
+    print("  LLM 判定 %d 篇，回退就近 %d 篇" % (n_llm, n_fallback))
+    if n_assigned + n_none:
+        print("  表型归属：挂给患者 %d，判 NONE(丢弃) %d，NONE 占比 %.1f%%"
+              % (n_assigned, n_none, 100.0 * n_none / (n_assigned + n_none)))
+    print("  全程耗时 %.1f 秒" % (time.perf_counter() - t0))
+
+    # 顺便打分
+    if args.gold:
+        from evaluate import load_jsonl, evaluate
+        gold_docs = load_jsonl(args.gold)
+        print("\n===== 打分（对照 sapbert_v1: micF1=0.4310 macF1=0.4030）=====")
+        evaluate(gold_docs, out_docs, verbose=True)
+        print("\n如满意，正式记录：")
+        print("  python scripts/evaluate.py --gold %s --pred %s \\" % (args.gold, args.out))
+        print("      --tag llm_assoc_v1 --note \"Qwen3-8B 归属替换就近\"")
+
+
+if __name__ == "__main__":
+    main()
