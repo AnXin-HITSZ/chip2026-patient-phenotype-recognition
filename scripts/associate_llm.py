@@ -226,6 +226,7 @@ def main():
     out_docs = []
     n_llm = n_fallback = 0
     n_none = n_assigned = 0
+    n_truncated = n_shortfall = 0     # 顶满 max_new_tokens 的篇数 / 解析行数<实体数 的篇数
     t0 = time.perf_counter()
 
     for di, d in enumerate(inputs):
@@ -243,7 +244,9 @@ def main():
             assoc = [{"patient_id": pid, "phenotype": []} for pid in roster_pids]
         else:
             prompt, valid_pids = build_prompt(d, entities, G, sec_idx, args.context_window)
-            mnt = args.max_new_tokens or (len(entities) * 8 + 64)
+            # 每行 "<序号>: <患者ID或NONE>"，多患者时患者ID(如 OII.1)更长，按每行 ~12 token
+            # + 128 余量估。贪心解码遇 EOS 自然停，故对已完整输出零成本，只兜住长文档不被截断。
+            mnt = args.max_new_tokens or (len(entities) * 12 + 128)
 
             messages = [{"role": "user", "content": prompt}]
             text = tok.apply_chat_template(
@@ -254,6 +257,9 @@ def main():
                 gen = model.generate(
                     **enc, max_new_tokens=mnt, do_sample=False,
                     pad_token_id=tok.eos_token_id)
+            n_new_tok = gen.shape[1] - enc.input_ids.shape[1]
+            # 顶满预算 = 没遇 EOS 自然停 = 输出被硬截断（后段序号缺失→误判 NONE）
+            truncated = n_new_tok >= mnt
             resp = tok.decode(gen[0][enc.input_ids.shape[1]:], skip_special_tokens=True)
             # 思考模式下剥掉 <think>...</think>，只留最终答案
             if "</think>" in resp:
@@ -273,6 +279,10 @@ def main():
                 n_llm += 1
                 n_assigned += len(assign)
                 n_none += (len(entities) - len(assign))
+                if truncated:
+                    n_truncated += 1
+                if n_parsed < len(entities):    # 有序号没被判到（截断/漏行）→ 那些实体默认 NONE
+                    n_shortfall += 1
 
         out_docs.append({
             "pmc_id": pmc, "pmid": d.get("pmid"),
@@ -286,6 +296,12 @@ def main():
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
     print("\n已写出: %s" % args.out)
     print("  LLM 判定 %d 篇，回退就近 %d 篇" % (n_llm, n_fallback))
+    if n_truncated or n_shortfall:
+        print("  ⚠ 输出被截断(顶满max_new_tokens) %d 篇；解析行数<实体数(有缺行) %d 篇"
+              % (n_truncated, n_shortfall))
+        print("    → 缺行的实体被默认判 NONE，会伤召回。可加大 --max-new-tokens 再跑。")
+    else:
+        print("  ✓ 无截断、无缺行（所有实体都拿到了判定）")
     if n_assigned + n_none:
         print("  表型归属：挂给患者 %d，判 NONE(丢弃) %d，NONE 占比 %.1f%%"
               % (n_assigned, n_none, 100.0 * n_none / (n_assigned + n_none)))
