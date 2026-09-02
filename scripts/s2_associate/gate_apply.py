@@ -201,7 +201,7 @@ def main():
         print("  阈值   留存实体   micF1    macF1    Score    Δmac(vs全留)")
         print("  " + "-" * 58)
         base_mac = None          # 阈值最低那行(通常 0.0=全留=就近强挂基线)作对照基准
-        best = None              # 记录 macF1 最优的阈值
+        best = None              # 记录 Score 最优的阈值
         for th in sorted(ths):
             out_docs, n_kept = assemble(th)
             mic, mac, sc = score_docs(gold_docs, out_docs)
@@ -210,10 +210,12 @@ def main():
             dmac = mac - base_mac
             print("  %.2f   %6d    %.4f   %.4f   %.4f   %+.4f"
                   % (th, n_kept, mic, mac, sc, dmac))
-            if best is None or mac > best[1]:
-                best = (th, mac, mic, sc, n_kept)
+            # 按 Score 挑：竞赛 micF1 与 macF1 等权，Score=0.25*(...)+0.25*(micF1+macF1)，
+            # 故最大化 Score 就是最大化 micF1+macF1 之和，而非任一单指标。
+            if best is None or sc > best[1]:
+                best = (th, sc, mic, mac, n_kept)
         print("  ---- 对照：就近强挂基线 dev micF1≈0.4310 / macF1≈0.4030 ----")
-        print("  >>> macF1 最优阈值 = %.2f：macF1=%.4f  micF1=%.4f  Score=%.4f（留 %d 实体）<<<"
+        print("  >>> Score 最优阈值 = %.2f：Score=%.4f  micF1=%.4f  macF1=%.4f（留 %d 实体）<<<"
               % (best[0], best[1], best[2], best[3], best[4]))
         print("确定阈值后，用 --threshold %.2f --out <文件> 生成正式预测。" % best[0])
         return
