@@ -86,6 +86,33 @@ def bucket(n):
     return ">5  "
 
 
+def miss_destination(gmap, bmap, lmap):
+    """量化每个 gold 患者的 miss 表型(y-l)去哪了，区分三种病因（改法相反）：
+       to_other = 该表型被 LLM 判给了**同文档的别的患者** → 挂错人(主患者偏向)，收结构。
+       to_none  = 该表型没进任何 LLM 患者，但 base 把它挂对了该患者 → LLM 判了 NONE(弃权过头)，放宽措辞。
+       to_lost  = base 也没挂到该患者 → 多半识别层就没有，非归属锅，两法都救不了。"""
+    from collections import defaultdict
+    llm_by_pmc = defaultdict(dict)
+    for (pmc, pid), s in lmap.items():
+        llm_by_pmc[pmc][pid] = s
+    to_other = to_none = to_lost = 0
+    for (pmc, pid), y in gmap.items():
+        l = lmap.get((pmc, pid), set())
+        b = bmap.get((pmc, pid), set())
+        others = set()
+        for pid2, s2 in llm_by_pmc[pmc].items():
+            if pid2 != pid:
+                others |= s2
+        for t in (y - l):
+            if t in others:
+                to_other += 1
+            elif t in b:
+                to_none += 1
+            else:
+                to_lost += 1
+    return to_other, to_none, to_lost
+
+
 def main():
     ap = argparse.ArgumentParser(description="子任务2 归属失分归因诊断")
     ap.add_argument("--gold", required=True, help="金标准 jsonl")
@@ -157,6 +184,14 @@ def main():
     print("  漏挂 miss(伤R)=%d   多挂 extra(伤P)=%d" % (tot_miss, tot_extra))
     print("  被 LLM 打成 0 分的患者(base>0→llm=0)=%d   被救活的患者(base=0→llm>0)=%d"
           % (zeroed, rescued))
+
+    # ---------- miss 去向拆解：挂错人 vs 判NONE vs 识别本就缺 ----------
+    to_other, to_none, to_lost = miss_destination(gmap, bmap, lmap)
+    print("\n  miss=%d 的去向拆解（决定改法方向）：" % tot_miss)
+    print("    挂给了同文档别的患者 to_other=%d  → LLM 挂错人(主患者偏向)，需在结构上强制每患者认领"
+          % to_other)
+    print("    LLM判NONE但base挂对了  to_none =%d  → LLM 弃权过头，需放宽弃权措辞" % to_none)
+    print("    base也没挂到(识别层缺) to_lost =%d  → 非归属问题，归属改不动" % to_lost)
 
     # ---------- delta 最负 top-N 明细 ----------
     rows.sort(key=lambda r: r[4])
