@@ -38,6 +38,8 @@ OBO="${2:-data/PatientPheX-V1-A/hp.obo}"
 PREFIX="${3:-A}"
 SIM_THRESHOLD="${SIM_THRESHOLD:-0.95}"
 INDEX_DIR="${INDEX_DIR:-outputs/sapbert}"
+CTX_WINDOW="${CTX_WINDOW:-120}"   # LLM 门控上下文窗口字符数（dev 扫描：240 最优，>240 反降）
+THINK="${THINK:-0}"               # 1=开思考模式（更准更慢；历史 0.6006 疑为此配置）
 
 PRED_SAPBERT="pred_${PREFIX}_sapbert.jsonl"
 PRED_GATE="pred_${PREFIX}_gate.jsonl"
@@ -54,6 +56,7 @@ echo "  输入     : $INPUT"
 echo "  hp.obo   : $OBO"
 echo "  前缀     : $PREFIX  →  $PRED_SAPBERT / $PRED_GATE"
 echo "  SapBERT阈值: $SIM_THRESHOLD   索引: $INDEX_DIR"
+echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK"
 echo "  HF_ENDPOINT: $HF_ENDPOINT"
 echo "=================================================="
 
@@ -96,12 +99,11 @@ python scripts/s1_identify/baseline_sapbert.py \
 
 # —— 步骤 2：子任务2 门控式归属 ——
 echo ""
-echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE"
-python scripts/s2_associate/associate_llm.py \
-    --input "$INPUT" \
-    --pred  "$PRED_SAPBERT" \
-    --out   "$PRED_GATE" \
-    --gate-only
+echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK）"
+GATE_ARGS=(--input "$INPUT" --pred "$PRED_SAPBERT" --out "$PRED_GATE"
+           --gate-only --context-window "$CTX_WINDOW")
+[ "$THINK" = "1" ] && GATE_ARGS+=(--think)
+python scripts/s2_associate/associate_llm.py "${GATE_ARGS[@]}"
 
 # —— 步骤 3：提交前自检 ——
 echo ""
