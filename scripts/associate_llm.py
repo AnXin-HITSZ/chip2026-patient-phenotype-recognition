@@ -7,39 +7,49 @@ associate_llm.py —— 子任务 2「患者-表型归属」的 LLM 后处理器
   * 只重算 association（谁得哪些表型），**不碰识别**——entities 原样来自子任务 1 的预测。
   * 用本地 Qwen3-8B 逐篇判断：每个已识别的表型 mention「属于哪个患者 / 不属于任何人(NONE)」。
 
+两种运行模式（--gate-only 决定 LLM 到底输出什么）：
+  * 默认（全权归属）：LLM 既判 keep/drop，又判「挂给哪个患者」。诊断（见 assoc_gate.py）
+    表明它把两件事捆一起——门控(砍~42%疾病背景FP)干得好，但路由(多患者篇把小患者表型
+    误挂给proband)干砸，16个小患者清零致 macF1 0.4030→0.3369。已弃用，仅留作对照。
+  * --gate-only（门控式，推荐，dev Score 0.5604→0.5783）：**LLM 只做 keep/drop，路由还给
+    就近**。门控式关联 = 就近路由(associate()) ∩ LLM 保留集(没判NONE的token)。就近按
+    offset 分配、绝不抢小患者的表型给 proband(消除 macro 崩)，同时 LLM 判 NONE 的背景
+    表型照砍(保住 micro 收益)。LLM 未覆盖/无实体等退化场景原样回退就近，永不比基线差。
+
 为什么要它（病根，已用 train 量化）：
   现基线 baseline_dict.associate() 把每个表型按 offset 就近**强挂**给最近患者（关联率 100%），
   但 train 上真正进入某患者 gold 关联的表型中位仅 ~58%——约 42% 是疾病背景/方法/别的队列/
   阴性描述，本不该挂给任何人。SapBERT 多召回的表型被 100% 强挂，全成了子任务 2 的 FP。
-  让 LLM 能回答「NONE（不属于任何列出的个体）」，就能砍掉这 ~42% 过度关联。
-  多患者文档（占 55%）里「挂给谁」本身也交给 LLM 判（如家系：proband vs 祖父/姑姑）。
+  LLM 能回答「NONE（不属于任何列出的个体）」，就砍掉这 ~42% 过度关联。
 
-数据流（按 pmc_id join 两个文件）：
+数据流（按 pmc_id join 一个文件，A 榜即子任务1 输出）：
     --input  题目版 jsonl（出 patient[] 与 full_text[]，用来做患者名册与上下文/章节）
-    --pred   子任务1 预测 jsonl（出 entities[]，即识别结果）
-    --out    输出 jsonl：entities 原样 + LLM 重算的 association
+    --pred   子任务1 预测 jsonl（出 entities[]；若带 association 也能被门控式重算）
+    --out    输出 jsonl：entities 原样 + association
   输出格式对齐 evaluate.py 的 patient_pheno_map 读法。
 
-鲁棒性：某篇 LLM 输出整体无法解析 → 该篇回退 baseline_dict.associate() 贪心结果
-        （--no-fallback 可关）。所以**永不比现基线更差**。缺某序号 → 保守判 NONE。
+鲁棒性：某篇 LLM 输出整体无法解析 → 该篇回退就近归属（--no-fallback 可关）。
+        **永不比现基线更差。**
 
 GPU 纪律：本项目全程用 GPU。检测不到 CUDA 直接报错退出，绝不静默退回 CPU。
          Qwen3-8B bf16 ≈16GB，4090 的 23.5GB 放得下，**需整卡开机（非无卡模式）**。
+         （注：单靠 --gate-only 组合两份已存在文件不需要 GPU；但只要做 LLM 判定就必须整卡。）
 
 用法（项目根目录、GPU 正常开机）：
     # 冒烟：先跑 2 篇，肉眼核对 prompt/输出
     python scripts/associate_llm.py \
-        --input data/split/dev_input.jsonl \
-        --pred  pred_dev_sapbert.jsonl \
-        --out   pred_dev_llm.jsonl \
-        --limit-docs 2 --show-prompt
+        --input data/split/dev_input.jsonl --pred pred_dev_sapbert.jsonl \
+        --out pred_dev_llm.jsonl --limit-docs 2 --show-prompt
 
-    # dev 全量 + 顺便打子任务2分数（对照 sapbert_v1: micF1=0.4310 macF1=0.4030）
+    # dev 全量、门控式（最终路线）：直接出 dev 门控预测 + 顺便打子任务2分数
     python scripts/associate_llm.py \
-        --input data/split/dev_input.jsonl \
-        --pred  pred_dev_sapbert.jsonl \
-        --out   pred_dev_llm.jsonl \
-        --gold  data/split/dev.jsonl
+        --input data/split/dev_input.jsonl --pred pred_dev_sapbert.jsonl \
+        --out pred_dev_gate.jsonl --gate-only --gold data/split/dev.jsonl
+
+    # A 榜（--pred 换子任务1 输出即可）：整卡跑 LLM，再交 evaluate 记录
+    python scripts/associate_llm.py \
+        --input data/split/test_input.jsonl --pred pred_test_sapbert.jsonl \
+        --out pred_test_gate.jsonl --gate-only
 """
 import argparse
 import json
@@ -180,6 +190,31 @@ def assoc_from_assignments(entities, assign, valid_pids):
     return [{"patient_id": pid, "phenotype": phs} for pid, phs in bucket.items()]
 
 
+def llm_routing(entities, assign, valid_pids):
+    """LLM 的「保留集」按患者聚合：{patient_id: set(identifier)}，只含被 LLM 判给该患者的。
+       门控式用它做 keep/drop；全权归属则直接当 association。"""
+    bucket = {pid: set() for pid in valid_pids}
+    for i, e in enumerate(entities, 1):
+        pid = assign.get(i)
+        if pid is None:
+            continue                        # 判 NONE：不保留
+        ident = e.get("identifier")
+        if ident is not None:
+            bucket[pid].add(ident)
+    return {pid: sorted(s) for pid, s in bucket.items()}
+
+
+def gate_assoc(base_assoc, llm_route):
+    """门控式关联 = 就近路由 ∩ LLM 保留集。对每患者求交集；某个患者不在 llm_route 里
+       （LLM 没判给它任何东西）→ 该患者为空，绝不误把别人表型塞给它。"""
+    out = []
+    for a in base_assoc:
+        pid = a["patient_id"]
+        kept = set(llm_route.get(pid, []))
+        out.append({"patient_id": pid, "phenotype": sorted(set(a["phenotype"]) & kept)})
+    return out
+
+
 # ----------------------------- 主流程 -----------------------------
 
 def main():
@@ -190,8 +225,10 @@ def main():
     ap.add_argument("--model", default=MODEL_NAME, help="HuggingFace 模型 id")
     ap.add_argument("--gold", help="金标准 jsonl；传了就顺便打分")
     ap.add_argument("--context-window", type=int, default=120, help="mention 左右各取多少字符上下文")
-    ap.add_argument("--max-new-tokens", type=int, default=0, help="生成上限；0=按实体数自动(n*8+64)")
+    ap.add_argument("--max-new-tokens", type=int, default=0, help="生成上限；0=按实体数自动(n*12+128)")
     ap.add_argument("--think", action="store_true", help="开 Qwen3 思考模式（更准但慢很多、更耗卡时）")
+    ap.add_argument("--gate-only", action="store_true",
+                    help="门控式（推荐）：LLM 只做 keep/drop，路由还给就近 = 就近∩LLM保留集")
     ap.add_argument("--no-fallback", action="store_true", help="解析失败也不回退就近归属（默认回退）")
     ap.add_argument("--limit-docs", type=int, default=0, help="只处理前 N 篇（冒烟用）；0=全量")
     ap.add_argument("--show-prompt", action="store_true", help="打印首篇 prompt 与回复，便于核对")
@@ -207,6 +244,8 @@ def main():
         sys.exit(2)
     device = torch.device("cuda:0")
     print("使用 GPU :", torch.cuda.get_device_name(0))
+    if args.gate_only:
+        print("模式     : 门控式（LLM 只做 keep/drop，路由还给就近）")
 
     # 读两个文件并按 pmc_id join
     inputs = [json.loads(l) for l in open(args.input, encoding="utf-8") if l.strip()]
@@ -275,7 +314,6 @@ def main():
                 assoc = associate(d, entities)
                 n_fallback += 1
             else:
-                assoc = assoc_from_assignments(entities, assign, valid_pids)
                 n_llm += 1
                 n_assigned += len(assign)
                 n_none += (len(entities) - len(assign))
@@ -283,6 +321,13 @@ def main():
                     n_truncated += 1
                 if n_parsed < len(entities):    # 有序号没被判到（截断/漏行）→ 那些实体默认 NONE
                     n_shortfall += 1
+                if args.gate_only:
+                    # LLM 只当门控：就近路由(path) ∩ LLM 保留集(keep)，多患者不被误路由
+                    route = llm_routing(entities, assign, valid_pids)
+                    base = associate(d, entities)
+                    assoc = gate_assoc(base, route)
+                else:
+                    assoc = assoc_from_assignments(entities, assign, valid_pids)
 
         out_docs.append({
             "pmc_id": pmc, "pmid": d.get("pmid"),
@@ -311,11 +356,11 @@ def main():
     if args.gold:
         from evaluate import load_jsonl, evaluate
         gold_docs = load_jsonl(args.gold)
-        print("\n===== 打分（对照 sapbert_v1: micF1=0.4310 macF1=0.4030）=====")
+        print("\n===== 打分（门控式对照 sapbert_v1: micF1=0.4310 macF1=0.4030）=====")
         evaluate(gold_docs, out_docs, verbose=True)
         print("\n如满意，正式记录：")
         print("  python scripts/evaluate.py --gold %s --pred %s \\" % (args.gold, args.out))
-        print("      --tag llm_assoc_v1 --note \"Qwen3-8B 归属替换就近\"")
+        print("      --tag llm_gate_v1 --note \"门控式归属：LLM只做keep/drop、路由还给就近\"")
 
 
 if __name__ == "__main__":
