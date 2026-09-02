@@ -10,7 +10,7 @@ split_data.py —— 把带答案的训练集切成 train / dev 两份。
 划分方式：确定性划分（不随机，保证可复现）。默认把「下标 % k == 0」的
      文献放入 dev，其余进 train。k=5 时得到 dev 16 篇 / train 64 篇。
 
-产出 data/split/ 五个文件：
+产出 data/split/ 四个文件：
      train.jsonl / dev.jsonl        —— 带答案（训练 / 打分尺子）
      train_input.jsonl / dev_input.jsonl —— 题目版（答案清空，同构测试集输入）
      其中 train_input 供「SapBERT 在 train 上识别」，为门控分类器提供
