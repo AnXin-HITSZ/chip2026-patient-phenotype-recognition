@@ -136,6 +136,19 @@ class Preprocessor:
                 "std": self.std, "feature_names": self.feature_names,
                 "num_cols": NUM_COLS, "bin_cols": BIN_COLS, "missable": MISSABLE}
 
+    @classmethod
+    def from_dict(cls, d):
+        """从 gate_preproc.json 复原预处理器（第 5 步 gate_apply 用）。
+           与 to_dict 配对：apply 阶段绝不重算 mean/std/sections，必须复用训练时保存的这套，
+           否则 train 与 apply 的特征分布错位（同一个实体在两处被标准化成不同的值）。"""
+        pre = cls()
+        pre.sections = d["sections"]
+        pre.fill = d["fill"]
+        pre.mean = d["mean"]
+        pre.std = d["std"]
+        pre.feature_names = d["feature_names"]
+        return pre
+
 
 # ======================= 模型定义（你来写） =======================
 
