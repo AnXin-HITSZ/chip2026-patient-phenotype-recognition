@@ -37,17 +37,17 @@ GPU 纪律：本项目全程用 GPU。检测不到 CUDA 直接报错退出，绝
 
 用法（项目根目录、GPU 正常开机）：
     # 冒烟：先跑 2 篇，肉眼核对 prompt/输出
-    python scripts/associate_llm.py \
+    python scripts/s2_associate/associate_llm.py \
         --input data/split/dev_input.jsonl --pred pred_dev_sapbert.jsonl \
         --out pred_dev_llm.jsonl --limit-docs 2 --show-prompt
 
     # dev 全量、门控式（最终路线）：直接出 dev 门控预测 + 顺便打子任务2分数
-    python scripts/associate_llm.py \
+    python scripts/s2_associate/associate_llm.py \
         --input data/split/dev_input.jsonl --pred pred_dev_sapbert.jsonl \
         --out pred_dev_gate.jsonl --gate-only --gold data/split/dev.jsonl
 
     # A 榜（--pred 换子任务1 输出即可）：整卡跑 LLM，再交 evaluate 记录
-    python scripts/associate_llm.py \
+    python scripts/s2_associate/associate_llm.py \
         --input data/split/test_input.jsonl --pred pred_test_sapbert.jsonl \
         --out pred_test_gate.jsonl --gate-only
 """
@@ -65,7 +65,7 @@ except AttributeError:
     pass
 
 # 复用词典基线里已验证的工具：全局文本重建 / 患者锚点 / 就近归属(兜底)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 from baseline_dict import build_global, patient_anchors, associate  # noqa: E402
 
 MODEL_NAME = "Qwen/Qwen3-8B"
@@ -359,7 +359,7 @@ def main():
         print("\n===== 打分（门控式对照 sapbert_v1: micF1=0.4310 macF1=0.4030）=====")
         evaluate(gold_docs, out_docs, verbose=True)
         print("\n如满意，正式记录：")
-        print("  python scripts/evaluate.py --gold %s --pred %s \\" % (args.gold, args.out))
+        print("  python scripts/core/evaluate.py --gold %s --pred %s \\" % (args.gold, args.out))
         print("      --tag llm_gate_v1 --note \"门控式归属：LLM只做keep/drop、路由还给就近\"")
 
 

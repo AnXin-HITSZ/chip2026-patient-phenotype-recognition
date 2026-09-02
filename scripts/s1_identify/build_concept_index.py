@@ -23,10 +23,10 @@ GPU 纪律：本项目约定全程用 GPU。检测不到 CUDA 直接报错退出
 
 用法（在项目根目录、GPU 正常开机下运行）：
     # 先冒烟测试：只编码前 500 条，验证流程跑通（几秒）
-    python scripts/build_concept_index.py --obo data/PatientPheX-V1-A/hp.obo --limit 500
+    python scripts/s1_identify/build_concept_index.py --obo data/PatientPheX-V1-A/hp.obo --limit 500
 
     # 确认无误后全量编码（4090 约 1-2 分钟），产物存到 outputs/sapbert/
-    python scripts/build_concept_index.py --obo data/PatientPheX-V1-A/hp.obo
+    python scripts/s1_identify/build_concept_index.py --obo data/PatientPheX-V1-A/hp.obo
 
 产物（默认 outputs/sapbert/，已被 .gitignore 忽略）：
     concept_emb.pt      [M, 768] float32，已 L2 归一化的概念向量
@@ -46,7 +46,7 @@ except AttributeError:
     pass
 
 # 复用词典基线里已验证的 OBO 解析与子树抽取（与 evaluate.py import explog 同一手法）
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 from baseline_dict import parse_obo, descendants, ROOT  # noqa: E402
 
 MODEL_NAME = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"

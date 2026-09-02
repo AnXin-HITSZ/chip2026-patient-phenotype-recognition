@@ -50,8 +50,15 @@
 │       ├── submit_pred_ex.jsonl      # 提交格式示例
 │       ├── hp.obo                    # HPO 本体（hp/releases/2026-06-23）
 │       └── README.md                 # 官方数据说明
-└── scripts/
-    └── inspect_data.py         # 数据统计 / offset 校验 / HPO 分支校验工具
+└── scripts/                    # 工具集（按角色分类，详见 scripts/README.md）
+    ├── core/                   # 共享库：baseline_dict / evaluate / explog
+    ├── s1_identify/            # 子任务1 识别：build_concept_index / baseline_sapbert
+    ├── s2_associate/           # 子任务2 归属：associate_llm / assoc_gate
+    ├── prep/                   # 数据准备：split_data / inspect_data
+    ├── track/                  # 评测记录：log_online / report
+    ├── diag/                   # 失分诊断：diag_assoc
+    ├── gpu_check.py            # 环境自检
+    └── run_A.sh                # A/B 榜一键推理链路
 ```
 
 > 数据文件需在天池平台**登录并报名后下载**（本仓库不分发数据）。当前 `data/` 下的 A 榜数据由参赛者自行下载放入。
@@ -72,10 +79,10 @@
 
 ```bash
 # 统计数据规模 + 章节分布
-python scripts/inspect_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl
+python scripts/prep/inspect_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl
 
 # 追加：offset 对齐校验 + HPO 分支/版本校验
-python scripts/inspect_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl \
+python scripts/prep/inspect_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl \
     --obo data/PatientPheX-V1-A/hp.obo --check-offset --check-hpo
 ```
 

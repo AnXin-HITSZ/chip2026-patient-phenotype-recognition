@@ -7,7 +7,7 @@ log_online.py —— 把天池 A/B 榜的线上成绩补录到某次实验上。
 「本地 dev 涨幅 ≈ 线上涨幅」的经验。
 
 用法（数字照抄天池成绩单那一行）:
-    python scripts/log_online.py --tag baseline_dict --board A \
+    python scripts/track/log_online.py --tag baseline_dict --board A \
         --score 0.5878 --men 0.6446 --doc 0.7121 --mic 0.5138 --mac 0.4807 \
         --submit-ts "2026-08-28 17:03:40" --note "词典基线首次提交"
 
@@ -23,7 +23,7 @@ try:
 except AttributeError:
     pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 import explog
 
 

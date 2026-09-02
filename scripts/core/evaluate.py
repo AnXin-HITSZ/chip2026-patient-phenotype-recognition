@@ -18,8 +18,8 @@ evaluate.py —— 本地复现 CHIP2026 评测一的四个 F1 与总分 Score�
   - note 的其它取值（如 'D'）按「非 NO」即正例处理。
 
 用法：
-    python scripts/evaluate.py --gold data/split/dev.jsonl --pred submit.jsonl
-    python scripts/evaluate.py --selftest        # 用 docs/07 §6 手算例校验本脚本
+    python scripts/core/evaluate.py --gold data/split/dev.jsonl --pred submit.jsonl
+    python scripts/core/evaluate.py --selftest        # 用 docs/07 §6 手算例校验本脚本
 
 注意：本脚本为「自研本地评测」，用于开发期相对比较；与官方线上评测可能存在
      未公开的边界差异（尤其 -1 在 doc 级、复合在子任务2 是否拆分）。以官方为准。

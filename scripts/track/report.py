@@ -4,7 +4,7 @@
 report.py —— 把 experiments.jsonl 渲染成人类可读的实验记录表格 results/实验记录.md。
 
 用法:
-    python scripts/report.py
+    python scripts/track/report.py
 
 输出为 Markdown 表格：按时间排序，每条实验一行，
 本地四项 F1 + Score，A/B 榜线上成绩，以及线上-本地得分差。
@@ -18,7 +18,7 @@ try:
 except AttributeError:
     pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 import explog
 
 MARKDOWN_PATH = os.path.join(explog.RESULTS_DIR, "实验记录.md")
@@ -40,7 +40,7 @@ def render(records):
     lines = [
         "# CHIP2026 实验记录",
         "",
-        "> 由 `scripts/report.py` 自动生成，源数据：`results/experiments.jsonl`。",
+        "> 由 `scripts/track/report.py` 自动生成，源数据：`results/experiments.jsonl`。",
         "> 本地分数来自 `evaluate.py --tag`，线上分数来自 `log_online.py`。",
         "> 「较上条」= 本行本地 Score 减去上一行本地 Score（🟢升/🔴降/⚪平）。",
         "",

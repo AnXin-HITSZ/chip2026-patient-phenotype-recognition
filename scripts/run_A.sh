@@ -79,14 +79,14 @@ PY
 if [ ! -d "$INDEX_DIR" ] || [ -z "$(ls -A "$INDEX_DIR" 2>/dev/null || true)" ]; then
   echo "❌ 概念索引缺失: $INDEX_DIR"
   echo "   先构建（一次性，整卡）："
-  echo "     python scripts/build_concept_index.py --obo \"$OBO\" --out-dir \"$INDEX_DIR\" --fp16"
+  echo "     python scripts/s1_identify/build_concept_index.py --obo \"$OBO\" --out-dir \"$INDEX_DIR\" --fp16"
   exit 1
 fi
 
 # —— 步骤 1：子任务1 SapBERT 识别 ——
 echo ""
 echo ">>> [1/3] 子任务1：SapBERT 识别 → $PRED_SAPBERT"
-python scripts/baseline_sapbert.py \
+python scripts/s1_identify/baseline_sapbert.py \
     --input "$INPUT" \
     --obo   "$OBO" \
     --index-dir "$INDEX_DIR" \
@@ -97,7 +97,7 @@ python scripts/baseline_sapbert.py \
 # —— 步骤 2：子任务2 门控式归属 ——
 echo ""
 echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE"
-python scripts/associate_llm.py \
+python scripts/s2_associate/associate_llm.py \
     --input "$INPUT" \
     --pred  "$PRED_SAPBERT" \
     --out   "$PRED_GATE" \
@@ -133,8 +133,8 @@ echo "=================================================="
 echo "✅ 完成。提交文件: $PRED_GATE"
 echo "   1) 到天池网页提交 $PRED_GATE"
 echo "   2) 拿到线上分后记录（无卡模式即可）："
-echo "      python scripts/log_online.py --tag llm_gate_v1 --board $PREFIX \\"
+echo "      python scripts/track/log_online.py --tag llm_gate_v1 --board $PREFIX \\"
 echo "          --score <线上Score> --men <..> --doc <..> --mic <..> --mac <..> \\"
 echo "          --submit-ts \"<天池提交时间>\" --note \"SapBERT@$SIM_THRESHOLD + Qwen3-8B 门控式归属\""
-echo "      python scripts/report.py"
+echo "      python scripts/track/report.py"
 echo "=================================================="

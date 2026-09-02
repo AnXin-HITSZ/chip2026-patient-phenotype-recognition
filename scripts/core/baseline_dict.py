@@ -17,11 +17,11 @@ baseline_dict.py —— 阶段 0「词典匹配」基线（零深度学习）。
 
 用法：
     # 在 dev 题目版上生成预测，再用 evaluate.py 打分
-    python scripts/baseline_dict.py \
+    python scripts/core/baseline_dict.py \
         --input data/split/dev_input.jsonl \
         --obo   data/PatientPheX-V1-A/hp.obo \
         --out   pred_dev.jsonl
-    python scripts/evaluate.py --gold data/split/dev.jsonl --pred pred_dev.jsonl
+    python scripts/core/evaluate.py --gold data/split/dev.jsonl --pred pred_dev.jsonl
 """
 import argparse
 import json
@@ -261,7 +261,7 @@ def main():
     print("已写出: %s" % args.out)
     print("  预测实体总数: %d，患者-表型对: %d" % (n_ent, n_assoc))
     print("接下来用 evaluate.py 打分：")
-    print("  python scripts/evaluate.py --gold <dev.jsonl> --pred %s" % args.out)
+    print("  python scripts/core/evaluate.py --gold <dev.jsonl> --pred %s" % args.out)
 
 
 if __name__ == "__main__":

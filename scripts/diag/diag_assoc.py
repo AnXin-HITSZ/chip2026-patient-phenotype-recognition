@@ -20,7 +20,7 @@ diag_assoc.py —— 子任务2「患者-表型归属」的失分归因诊断（
 macro/micro 应与 evaluate 打分逐位吻合——先看开头「自洽校验」两行确认。
 
 用法（无卡模式即可，项目根目录）：
-    python scripts/diag_assoc.py \
+    python scripts/diag/diag_assoc.py \
         --gold data/split/dev.jsonl \
         --base pred_dev_sapbert.jsonl \
         --llm  pred_dev_llm.jsonl
@@ -35,7 +35,7 @@ try:
 except AttributeError:
     pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 from evaluate import load_jsonl, patient_pheno_map, split_ids, prf  # noqa: E402
 
 

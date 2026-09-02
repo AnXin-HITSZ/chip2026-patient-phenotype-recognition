@@ -10,8 +10,8 @@ PatientPheX 数据检查工具（CHIP2026 面向生物医学全文的特定患�
   3. 校验 identifier 是否落在给定 HPO 版本的 Phenotypic abnormality (HP:0000118) 分支。
 
 用法：
-  python scripts/inspect_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl
-  python scripts/inspect_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl \
+  python scripts/prep/inspect_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl
+  python scripts/prep/inspect_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl \
       --obo data/PatientPheX-V1-A/hp.obo --check-offset --check-hpo
 
 无第三方依赖，仅用标准库。

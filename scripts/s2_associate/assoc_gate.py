@@ -30,7 +30,7 @@ macro 逐 gold 患者等权，对小患者被清零极敏感，所以路由的�
 口径与 evaluate.py 一致：token 级用 split_ids 拆复合/去重，输出单 token 列表（evaluate 会再拆，等价）。
 
 用法（无卡模式即可，项目根目录）：
-    python scripts/assoc_gate.py \
+    python scripts/s2_associate/assoc_gate.py \
         --base pred_dev_sapbert.jsonl \
         --llm  pred_dev_llm.jsonl \
         --out  pred_dev_gate.jsonl \
@@ -47,7 +47,7 @@ try:
 except AttributeError:
     pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 from evaluate import load_jsonl, split_ids, evaluate  # noqa: E402
 
 

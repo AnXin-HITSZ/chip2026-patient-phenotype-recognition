@@ -11,8 +11,8 @@ split_data.py —— 把带答案的训练集切成 train / dev 两份。
      文献放入 dev，其余进 train。k=5 时得到 dev 16 篇 / train 64 篇。
 
 用法：
-    python scripts/split_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl
-    python scripts/split_data.py <train.jsonl> --dev-every 5 --outdir data/split
+    python scripts/prep/split_data.py data/PatientPheX-V1-A/PatientPheX-train.jsonl
+    python scripts/prep/split_data.py <train.jsonl> --dev-every 5 --outdir data/split
 """
 import argparse
 import json

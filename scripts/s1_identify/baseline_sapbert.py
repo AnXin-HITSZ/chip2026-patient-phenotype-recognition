@@ -22,14 +22,14 @@ GPU 纪律：全程用 GPU，检测不到 CUDA 直接报错退出，绝不静默
 
 用法（项目根目录、GPU 正常开机、已跑过 build_concept_index.py）：
   # 单一阈值：生成 dev 预测
-  python scripts/baseline_sapbert.py \
+  python scripts/s1_identify/baseline_sapbert.py \
       --input data/split/dev_input.jsonl \
       --obo   data/PatientPheX-V1-A/hp.obo \
       --out   pred_dev_sapbert.jsonl \
       --sim-threshold 0.90
 
   # 自动扫阈值：用 dev 答案找最优阈值（需 --gold）
-  python scripts/baseline_sapbert.py \
+  python scripts/s1_identify/baseline_sapbert.py \
       --input data/split/dev_input.jsonl \
       --obo   data/PatientPheX-V1-A/hp.obo \
       --gold  data/split/dev.jsonl \
@@ -48,7 +48,7 @@ try:
 except AttributeError:
     pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 from baseline_dict import (  # noqa: E402
     parse_obo, build_dictionary, build_global, match_entities, associate,
     TOKEN_RE,
@@ -325,7 +325,7 @@ def main():
           % (args.sim_threshold, n_dict, n_new, n_dict + n_new))
     print("  全程耗时 %.1f 秒" % (time.perf_counter() - t0))
     print("接下来打分：")
-    print("  python scripts/evaluate.py --gold data/split/dev.jsonl --pred %s \\" % args.out)
+    print("  python scripts/core/evaluate.py --gold data/split/dev.jsonl --pred %s \\" % args.out)
     print("      --tag sapbert_v1 --note \"SapBERT补召回 阈值%.2f\"" % args.sim_threshold)
 
 
