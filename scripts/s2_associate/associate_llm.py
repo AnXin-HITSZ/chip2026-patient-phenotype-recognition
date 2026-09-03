@@ -66,7 +66,7 @@ except AttributeError:
 
 # 复用词典基线里已验证的工具：全局文本重建 / 患者锚点 / 就近归属(兜底)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
-from baseline_dict import build_global, patient_anchors, associate  # noqa: E402
+from baseline_dict import build_global, associate  # noqa: E402
 
 MODEL_NAME = "Qwen/Qwen3-8B"
 # 解析 LLM 每行 "序号: 患者ID/NONE"。允许 ':' 或 '.' 或 ')' 作分隔，容忍前导空白/编号符
@@ -111,14 +111,11 @@ def patient_roster(doc):
 
 # ----------------------------- Prompt 组装 -----------------------------
 
-def build_prompt(doc, entities, global_text, sec_idx, window, inject_anchors=False):
+def build_prompt(doc, entities, global_text, sec_idx, window):
     """为一篇文档组 prompt。返回 (prompt_str, valid_pids:set)。
-       表型清单里每个实体给：序号 + 所在章节 + mention 文本 + ±window 字符上下文。
-       inject_anchors=True 时，额外附「离该表型最近的患者及字符距离」，帮 LLM 判 keep/drop
-       （离所有患者都很远 → 更可能是疾病背景 → 倾向 NONE）。"""
+       表型清单里每个实体给：序号 + 所在章节 + mention 文本 + ±window 字符上下文。"""
     roster = patient_roster(doc)
     valid_pids = {pid for pid, _ in roster}
-    anchors = patient_anchors(doc) if inject_anchors else None
 
     lines = []
     lines.append(
@@ -132,12 +129,6 @@ def build_prompt(doc, entities, global_text, sec_idx, window, inject_anchors=Fal
                  "listed individual — e.g. it is general disease background, a definition, a "
                  "method, another cohort/reference, or the text says it is normal/absent/ruled "
                  "out for the patient — answer NONE.")
-    if inject_anchors:
-        lines.append("")
-        lines.append("Hint: each phenotype shows the nearest listed individual by character "
-                     "distance in the text. A small distance suggests it belongs to that "
-                     "individual; a very large distance suggests general background (NONE). "
-                     "Use it as a hint only — the wording of the context is decisive.")
     lines.append("")
     lines.append("Individuals:")
     for pid, rep in roster:
@@ -153,18 +144,7 @@ def build_prompt(doc, entities, global_text, sec_idx, window, inject_anchors=Fal
         right = min(len(global_text), off + length + window)
         ctx = " ".join(global_text[left:right].split())
         men = " ".join((e.get("text") or "").split())
-        anchor_str = ""
-        if inject_anchors and anchors:
-            best_pid, best_d = None, None
-            for pid, offs in anchors:
-                if not offs:
-                    continue
-                d = min(abs(off - o) for o in offs)
-                if best_d is None or d < best_d:
-                    best_pid, best_d = pid, d
-            if best_pid is not None:
-                anchor_str = ' | nearest: %s (%d chars away)' % (best_pid, best_d)
-        lines.append('  %d. [%s] "%s"%s | context: ...%s...' % (i, st, men, anchor_str, ctx))
+        lines.append('  %d. [%s] "%s" | context: ...%s...' % (i, st, men, ctx))
     lines.append("")
     lines.append("Output EXACTLY one line per phenotype, in the form:")
     lines.append("<number>: <individual ID or NONE>")
@@ -266,8 +246,6 @@ def main():
     ap.add_argument("--route-max-dist", type=int, default=0,
                     help="方法1：过滤口径下，表型离最近患者锚点 > 此字符距离则不挂(砍背景FP)；"
                          "0=不启用（dev 扫描最优 ~800）。须与 --filter-mode 同开")
-    ap.add_argument("--inject-anchors", action="store_true",
-                    help="方法2：prompt 里给每个表型附「最近患者及距离」，辅助 LLM 判 keep/drop")
     ap.add_argument("--no-fallback", action="store_true", help="解析失败也不回退就近归属（默认回退）")
     ap.add_argument("--limit-docs", type=int, default=0, help="只处理前 N 篇（冒烟用）；0=全量")
     ap.add_argument("--show-prompt", action="store_true", help="打印首篇 prompt 与回复，便于核对")
@@ -331,8 +309,7 @@ def main():
         elif not entities:
             assoc = [{"patient_id": pid, "phenotype": []} for pid in roster_pids]
         else:
-            prompt, valid_pids = build_prompt(d, entities, G, sec_idx, args.context_window,
-                                              inject_anchors=args.inject_anchors)
+            prompt, valid_pids = build_prompt(d, entities, G, sec_idx, args.context_window)
             # 每行 "<序号>: <患者ID或NONE>"，多患者时患者ID(如 OII.1)更长，按每行 ~12 token
             # + 128 余量估。贪心解码遇 EOS 自然停，故对已完整输出零成本，只兜住长文档不被截断。
             mnt = args.max_new_tokens or (len(entities) * 12 + 128)
