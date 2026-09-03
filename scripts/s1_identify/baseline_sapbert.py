@@ -133,6 +133,59 @@ def gen_candidates(global_text, dict_entities, max_ngram=CAND_MAX_NGRAM):
     return cands
 
 
+def gen_dict_extensions(global_text, dict_entities, max_ngram=CAND_MAX_NGRAM):
+    """A3 修复：对每个词典命中，向左/右扩「自由词元」生成超集候选。
+
+    背景：词典贪心短匹配（如 diabetes）占住词元后，gen_candidates 遇占位即 break，
+    生成不出跨越它的更长表型（diabetes mellitus）。这里专门为每个词典命中补出它的超集，
+    交 SapBERT 打分；build_entities 里若某超集 score≥阈值，就顶替被它完全包含的短匹配。
+
+    只扩到「自由词元」（不被任何词典命中占据）→ 自然不会跨越*别的*词典命中，
+    故每个超集恰好包含唯一一个词典命中（它的来源），顶替时不误伤别的命中。
+
+    返回 [(start, end, text, src_iv)]，src_iv=(hs,he) 是被扩展词典命中的字符区间（可被顶替）。
+    """
+    occ = occupied_intervals(dict_entities)
+    toks = [(m.start(), m.end()) for m in TOKEN_RE.finditer(global_text)]
+    free = [not token_occupied(s, e, occ) for (s, e) in toks]
+    n = len(toks)
+    exts = []
+    for de in dict_entities:
+        hs, he = de["offset"], de["offset"] + de["length"]
+        core = [i for i, (s, e) in enumerate(toks) if s < he and e > hs]  # 命中覆盖的词元
+        if not core:
+            continue                                   # 命中不落词元边界（罕见），跳过
+        lc, rc = core[0], core[-1]
+        core_ntok = rc - lc + 1
+        if core_ntok >= max_ngram:
+            continue                                   # 命中本身已达上限，无扩展空间
+        budget = max_ngram - core_ntok                 # 还能加几个词元（左右合计）
+        max_l = 0                                      # 左侧连续可扩的自由词元数
+        while lc - max_l - 1 >= 0 and free[lc - max_l - 1] and max_l < budget:
+            max_l += 1
+        max_r = 0                                      # 右侧连续可扩的自由词元数
+        while rc + max_r + 1 < n and free[rc + max_r + 1] and max_r < budget:
+            max_r += 1
+        src_iv = (hs, he)
+        for l in range(0, max_l + 1):
+            for r in range(0, max_r + 1):
+                if l + r == 0:
+                    continue                           # 不扩=词典命中本身，跳过
+                if core_ntok + l + r > max_ngram:
+                    continue                           # 左右合计超上限
+                start, end = toks[lc - l][0], toks[rc + r][1]
+                text = global_text[start:end]
+                stripped = text.strip()
+                if len(stripped) <= 2:                 # 与 gen_candidates 同一套卫生过滤
+                    continue
+                if DIGIT_RE.match(stripped):
+                    continue
+                if not stripped[0].isalpha():
+                    continue
+                exts.append((start, end, text, src_iv))
+    return exts
+
+
 # ----------------------- SapBERT 检索 -----------------------
 
 def retrieve_scores(texts, tok, model, concept_emb, meta, device, bs, max_len):
@@ -160,9 +213,15 @@ def retrieve_scores(texts, tok, model, concept_emb, meta, device, bs, max_len):
 
 # ----------------------- 合并（贪心去重） -----------------------
 
-def build_entities(global_text, dict_entities, cand_spans, text2hit, threshold):
-    """词典实体 + 阈值以上的 SapBERT 候选（按 score 降序贪心，不重叠）。"""
-    # 先收所有过阈值候选
+def build_entities(global_text, dict_entities, cand_spans, text2hit, threshold,
+                   ext_spans=None):
+    """词典实体 + 阈值以上的 SapBERT 候选（按 score 降序贪心，不重叠）。
+
+    ext_spans（A3 词典边界扩展候选，[(start,end,text,src_iv)]）若给：某扩展候选 score≥阈值
+    且只压住自己来源的那个词典命中（不碰别的已选区间）时，顶替该短匹配（长表型替短匹配）。
+    ext_spans=None（默认）时行为与原版逐字节一致。
+    """
+    # 先收所有过阈值候选：ext 位=None 普通候选（不可碰词典）；=src_iv 扩展候选（可顶替其来源命中）
     scored = []
     for (start, end, text) in cand_spans:
         hit = text2hit.get(text)
@@ -170,14 +229,30 @@ def build_entities(global_text, dict_entities, cand_spans, text2hit, threshold):
             continue
         hpo_id, name, score = hit
         if score >= threshold:
-            scored.append((score, start, end, text, hpo_id, name))
+            scored.append((score, start, end, text, hpo_id, name, None))
+    for (start, end, text, src_iv) in (ext_spans or []):
+        hit = text2hit.get(text)
+        if hit is None:
+            continue
+        hpo_id, name, score = hit
+        if score >= threshold:
+            scored.append((score, start, end, text, hpo_id, name, src_iv))
     scored.sort(key=lambda x: (-x[0], x[1], -(x[2] - x[1])))   # 高分优先，靠前优先，长者优先
 
     selected = occupied_intervals(dict_entities)[:]           # 已占区间（含词典）
+    displaced = set()                                         # 被超集顶替掉的词典命中区间
     new_ents = []
-    for score, start, end, text, hpo_id, name in scored:
-        if token_occupied(start, end, selected):
-            continue
+    for score, start, end, text, hpo_id, name, src_iv in scored:
+        if src_iv is None:
+            if token_occupied(start, end, selected):          # 普通候选：碰任何已占即跳过（原逻辑）
+                continue
+        else:
+            others = [iv for iv in selected if iv != src_iv]  # 扩展候选：可压住来源命中，不碰其余
+            if token_occupied(start, end, others):
+                continue
+            if src_iv in selected:
+                selected.remove(src_iv)                       # 顶替：摘掉短匹配
+                displaced.add(src_iv)
         selected.append((start, end))
         new_ents.append({
             "identifier": hpo_id,
@@ -189,7 +264,9 @@ def build_entities(global_text, dict_entities, cand_spans, text2hit, threshold):
             "retrieved_name": name,        # 非标准字段，评估不读，便于开发期核对
             "retrieved_score": round(score, 4),
         })
-    return dict_entities + new_ents, len(new_ents)
+    kept_dict = [de for de in dict_entities
+                 if (de["offset"], de["offset"] + de["length"]) not in displaced]
+    return kept_dict + new_ents, len(new_ents)
 
 
 # ----------------------- 主流程 -----------------------
@@ -208,6 +285,11 @@ def main():
     ap.add_argument("--max-length", type=int, default=32)
     ap.add_argument("--limit-docs", type=int, default=0, help="只处理前 N 篇（冒烟用）；0=全量")
     ap.add_argument("--fp16", action="store_true", help="半精度编码，更快省显存")
+    ap.add_argument("--extend-dict", action="store_true",
+                    help="A3 修复：对每个词典命中补出向左右扩自由词元的超集候选，"
+                         "score≥阈值则顶替短匹配（默认关，与原基线一致）")
+    ap.add_argument("--cand-max-ngram", type=int, default=CAND_MAX_NGRAM,
+                    help="A1：候选最多几个词元（默认 %d）；提高可召回超 4 词元的长表型" % CAND_MAX_NGRAM)
     args = ap.parse_args()
 
     import torch
@@ -247,18 +329,23 @@ def main():
     print("处理 %d 篇文献 ..." % len(docs))
 
     # 逐篇：词典匹配 + 候选生成（缓存，供单/多阈值复用）
-    per_doc = []          # [(doc, global_text, dict_entities, cand_spans)]
+    per_doc = []          # [(doc, global_text, dict_entities, cand_spans, ext_spans)]
     all_cand_texts = []
     t0 = time.perf_counter()
     for d in docs:
         G = build_global(d.get("full_text", []))
         dict_ents = match_entities(G, phrase2id)
-        cands = gen_candidates(G, dict_ents)
-        per_doc.append((d, G, dict_ents, cands))
+        cands = gen_candidates(G, dict_ents, max_ngram=args.cand_max_ngram)
+        exts = (gen_dict_extensions(G, dict_ents, max_ngram=args.cand_max_ngram)
+                if args.extend_dict else [])
+        per_doc.append((d, G, dict_ents, cands, exts))
         all_cand_texts.extend(c[2] for c in cands)
+        all_cand_texts.extend(e[2] for e in exts)
     n_dict = sum(len(x[2]) for x in per_doc)
-    print("  词典实体总数: %d，候选 span 总数: %d（唯一 %d）"
-          % (n_dict, len(all_cand_texts), len(set(all_cand_texts))))
+    n_ext = sum(len(x[4]) for x in per_doc)
+    print("  词典实体总数: %d，候选 span 总数: %d（唯一 %d）%s"
+          % (n_dict, len(all_cand_texts), len(set(all_cand_texts)),
+             ("，其中词典扩展 %d" % n_ext) if args.extend_dict else ""))
 
     # 批量检索所有唯一候选
     print("SapBERT 编码 + 检索候选 ...")
@@ -279,8 +366,9 @@ def main():
         """按阈值组装所有文档的预测。返回 (out_docs, n_new_total)。"""
         out_docs = []
         n_new = 0
-        for (d, G, dict_ents, cands) in per_doc:
-            ents, k = build_entities(G, dict_ents, cands, text2hit, threshold)
+        for (d, G, dict_ents, cands, exts) in per_doc:
+            ents, k = build_entities(G, dict_ents, cands, text2hit, threshold,
+                                     ext_spans=exts)
             n_new += k
             assoc = associate(d, ents)
             out_docs.append({
@@ -320,9 +408,10 @@ def main():
     with open(args.out, "w", encoding="utf-8") as f:
         for d in out_docs:
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
+    n_ents = sum(len(d["entities"]) for d in out_docs)     # 真实体总数（顶替后，已扣被摘短匹配）
     print("\n已写出: %s" % args.out)
-    print("  阈值 %.2f 下，词典 %d + SapBERT 补 %d = 实体总数 %d"
-          % (args.sim_threshold, n_dict, n_new, n_dict + n_new))
+    print("  阈值 %.2f 下，SapBERT 补 %d，实体总数 %d（词典命中 %d，扩展开=%s）"
+          % (args.sim_threshold, n_new, n_ents, n_dict, args.extend_dict))
     print("  全程耗时 %.1f 秒" % (time.perf_counter() - t0))
     print("接下来打分：")
     print("  python scripts/core/evaluate.py --gold data/split/dev.jsonl --pred %s \\" % args.out)
