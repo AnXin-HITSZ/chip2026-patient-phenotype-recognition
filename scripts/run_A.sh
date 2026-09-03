@@ -40,6 +40,7 @@ SIM_THRESHOLD="${SIM_THRESHOLD:-0.95}"
 INDEX_DIR="${INDEX_DIR:-outputs/sapbert}"
 CTX_WINDOW="${CTX_WINDOW:-120}"   # LLM 门控上下文窗口字符数（dev 扫描：240 最优，>240 反降）
 THINK="${THINK:-0}"               # 1=开思考模式（更准更慢；历史 0.6006 疑为此配置）
+FILTER="${FILTER:-0}"             # 1=过滤口径（真门控，dev 贪心240 最优 0.5848；0=旧交集口径）
 
 PRED_SAPBERT="pred_${PREFIX}_sapbert.jsonl"
 PRED_GATE="pred_${PREFIX}_gate.jsonl"
@@ -56,7 +57,7 @@ echo "  输入     : $INPUT"
 echo "  hp.obo   : $OBO"
 echo "  前缀     : $PREFIX  →  $PRED_SAPBERT / $PRED_GATE"
 echo "  SapBERT阈值: $SIM_THRESHOLD   索引: $INDEX_DIR"
-echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK"
+echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER"
 echo "  HF_ENDPOINT: $HF_ENDPOINT"
 echo "=================================================="
 
@@ -99,10 +100,11 @@ python scripts/s1_identify/baseline_sapbert.py \
 
 # —— 步骤 2：子任务2 门控式归属 ——
 echo ""
-echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK）"
+echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK，过滤 $FILTER）"
 GATE_ARGS=(--input "$INPUT" --pred "$PRED_SAPBERT" --out "$PRED_GATE"
            --gate-only --context-window "$CTX_WINDOW")
-[ "$THINK" = "1" ] && GATE_ARGS+=(--think)
+[ "$THINK" = "1" ]  && GATE_ARGS+=(--think)
+[ "$FILTER" = "1" ] && GATE_ARGS+=(--filter-mode)
 python scripts/s2_associate/associate_llm.py "${GATE_ARGS[@]}"
 
 # —— 步骤 3：提交前自检 ——
