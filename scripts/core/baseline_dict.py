@@ -200,8 +200,10 @@ def patient_anchors(doc):
     return out
 
 
-def associate(doc, entities):
-    """把每个命中表型按 offset 就近挂到最近患者，按 patient_id 去重。"""
+def associate(doc, entities, max_dist=None):
+    """把每个命中表型按 offset 就近挂到最近患者，按 patient_id 去重。
+       max_dist 非 None 时：表型到最近锚点距离 > max_dist（或无可用锚点走兜底）则判不挂(NONE)，
+       用于砍掉离所有患者都很远的背景 FP（dev 分析：FP-N 距离中位 1469 ≫ TP 的 406）。"""
     anchors = patient_anchors(doc)
     assoc = {pid: [] for pid, _ in anchors}
     if not anchors:
@@ -216,7 +218,12 @@ def associate(doc, entities):
             if best_d is None or d < best_d:
                 best_pid, best_d = pid, d
         if best_pid is None:
+            # 无任何可用锚点：原兜底挂 anchors[0]；但开了距离阈值时视为不可信 → 砍
+            if max_dist is not None:
+                continue
             best_pid = anchors[0][0]
+        elif max_dist is not None and best_d > max_dist:
+            continue                    # 离最近锚点太远 → 判 NONE，不挂
         if e["identifier"] not in assoc[best_pid]:
             assoc[best_pid].append(e["identifier"])
     return [{"patient_id": pid, "phenotype": phs} for pid, phs in assoc.items()]

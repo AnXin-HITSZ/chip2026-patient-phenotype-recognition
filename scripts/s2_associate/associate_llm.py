@@ -111,11 +111,14 @@ def patient_roster(doc):
 
 # ----------------------------- Prompt 组装 -----------------------------
 
-def build_prompt(doc, entities, global_text, sec_idx, window):
+def build_prompt(doc, entities, global_text, sec_idx, window, inject_anchors=False):
     """为一篇文档组 prompt。返回 (prompt_str, valid_pids:set)。
-       表型清单里每个实体给：序号 + 所在章节 + mention 文本 + ±window 字符上下文。"""
+       表型清单里每个实体给：序号 + 所在章节 + mention 文本 + ±window 字符上下文。
+       inject_anchors=True 时，额外附「离该表型最近的患者及字符距离」，帮 LLM 判 keep/drop
+       （离所有患者都很远 → 更可能是疾病背景 → 倾向 NONE）。"""
     roster = patient_roster(doc)
     valid_pids = {pid for pid, _ in roster}
+    anchors = patient_anchors(doc) if inject_anchors else None
 
     lines = []
     lines.append(
@@ -129,6 +132,12 @@ def build_prompt(doc, entities, global_text, sec_idx, window):
                  "listed individual — e.g. it is general disease background, a definition, a "
                  "method, another cohort/reference, or the text says it is normal/absent/ruled "
                  "out for the patient — answer NONE.")
+    if inject_anchors:
+        lines.append("")
+        lines.append("Hint: each phenotype shows the nearest listed individual by character "
+                     "distance in the text. A small distance suggests it belongs to that "
+                     "individual; a very large distance suggests general background (NONE). "
+                     "Use it as a hint only — the wording of the context is decisive.")
     lines.append("")
     lines.append("Individuals:")
     for pid, rep in roster:
@@ -144,7 +153,18 @@ def build_prompt(doc, entities, global_text, sec_idx, window):
         right = min(len(global_text), off + length + window)
         ctx = " ".join(global_text[left:right].split())
         men = " ".join((e.get("text") or "").split())
-        lines.append('  %d. [%s] "%s" | context: ...%s...' % (i, st, men, ctx))
+        anchor_str = ""
+        if inject_anchors and anchors:
+            best_pid, best_d = None, None
+            for pid, offs in anchors:
+                if not offs:
+                    continue
+                d = min(abs(off - o) for o in offs)
+                if best_d is None or d < best_d:
+                    best_pid, best_d = pid, d
+            if best_pid is not None:
+                anchor_str = ' | nearest: %s (%d chars away)' % (best_pid, best_d)
+        lines.append('  %d. [%s] "%s"%s | context: ...%s...' % (i, st, men, anchor_str, ctx))
     lines.append("")
     lines.append("Output EXACTLY one line per phenotype, in the form:")
     lines.append("<number>: <individual ID or NONE>")
@@ -215,14 +235,15 @@ def gate_assoc(base_assoc, llm_route):
     return out
 
 
-def filter_assoc(doc, entities, assign):
+def filter_assoc(doc, entities, assign, max_dist=None):
     """真·门控（过滤口径）= LLM 只决定 keep/drop，留下的实体全部路由还给就近。
        与 gate_assoc（交集口径）的区别：彻底丢弃 LLM「挂给哪个患者」的意见，只用它
        「没判 NONE」这一条 keep 信号。因此不会出现「就近路由到 P1、LLM 却说 P2 →
        交集为空 → 该实体双杀蒸发」——这个双杀专砍多患者篇里的小患者、系统性压低 macF1。
-       assign 里有键(=LLM 判给了某真实患者) 即 keep；判 NONE/编造ID/漏行 → drop。"""
+       assign 里有键(=LLM 判给了某真实患者) 即 keep；判 NONE/编造ID/漏行 → drop。
+       max_dist：非 None 时再叠一道距离阈值，砍掉离所有患者都很远的背景 FP（见 associate）。"""
     kept = [e for i, e in enumerate(entities, 1) if assign.get(i) is not None]
-    return associate(doc, kept)
+    return associate(doc, kept, max_dist=max_dist)
 
 
 # ----------------------------- 主流程 -----------------------------
@@ -242,6 +263,11 @@ def main():
     ap.add_argument("--filter-mode", action="store_true",
                     help="真门控（过滤口径）：LLM 只 keep/drop，留下的全交就近路由；"
                          "丢弃 LLM 路由意见、消除双杀 bug。须与 --gate-only 同开")
+    ap.add_argument("--route-max-dist", type=int, default=0,
+                    help="方法1：过滤口径下，表型离最近患者锚点 > 此字符距离则不挂(砍背景FP)；"
+                         "0=不启用（dev 扫描最优 ~800）。须与 --filter-mode 同开")
+    ap.add_argument("--inject-anchors", action="store_true",
+                    help="方法2：prompt 里给每个表型附「最近患者及距离」，辅助 LLM 判 keep/drop")
     ap.add_argument("--no-fallback", action="store_true", help="解析失败也不回退就近归属（默认回退）")
     ap.add_argument("--limit-docs", type=int, default=0, help="只处理前 N 篇（冒烟用）；0=全量")
     ap.add_argument("--show-prompt", action="store_true", help="打印首篇 prompt 与回复，便于核对")
@@ -249,6 +275,9 @@ def main():
 
     if args.filter_mode and not args.gate_only:
         print("❌ --filter-mode 须与 --gate-only 同开（它是门控式的一种口径）。已中止。")
+        sys.exit(2)
+    if args.route_max_dist and not args.filter_mode:
+        print("❌ --route-max-dist 距离阈值只在过滤口径下生效，须与 --filter-mode 同开。已中止。")
         sys.exit(2)
 
     import torch
@@ -302,7 +331,8 @@ def main():
         elif not entities:
             assoc = [{"patient_id": pid, "phenotype": []} for pid in roster_pids]
         else:
-            prompt, valid_pids = build_prompt(d, entities, G, sec_idx, args.context_window)
+            prompt, valid_pids = build_prompt(d, entities, G, sec_idx, args.context_window,
+                                              inject_anchors=args.inject_anchors)
             # 每行 "<序号>: <患者ID或NONE>"，多患者时患者ID(如 OII.1)更长，按每行 ~12 token
             # + 128 余量估。贪心解码遇 EOS 自然停，故对已完整输出零成本，只兜住长文档不被截断。
             mnt = args.max_new_tokens or (len(entities) * 12 + 128)
@@ -345,7 +375,8 @@ def main():
                     if args.filter_mode:
                         # 真门控（过滤口径）：LLM 只 keep/drop，留下的全交就近路由，
                         # 丢弃 LLM「挂给谁」的意见 → 消除双杀 bug（就近≠LLM 时不再蒸发）
-                        assoc = filter_assoc(d, entities, assign)
+                        assoc = filter_assoc(d, entities, assign,
+                                             max_dist=(args.route_max_dist or None))
                     else:
                         # 交集口径：就近路由(path) ∩ LLM 保留集(keep)，多患者不被误路由
                         route = llm_routing(entities, assign, valid_pids)
