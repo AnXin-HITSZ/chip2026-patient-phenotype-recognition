@@ -42,6 +42,7 @@ CTX_WINDOW="${CTX_WINDOW:-120}"   # LLM 门控上下文窗口字符数（dev 扫
 THINK="${THINK:-0}"               # 1=开思考模式（更准更慢；历史 0.6006 疑为此配置）
 FILTER="${FILTER:-0}"             # 1=过滤口径（真门控，dev 贪心240 最优 0.5848；0=旧交集口径）
 ROUTE_MAX_DIST="${ROUTE_MAX_DIST:-0}"  # 方法1 距离阈值：表型离最近患者>此字符数则判NONE(砍背景FP)；须 FILTER=1；0=不启用，dev 最优 800(→0.6025)
+CAND_MAX_NGRAM="${CAND_MAX_NGRAM:-4}"  # A1：SapBERT 候选最多几个词元；dev 实测 6 最优(保底menF1+0.007/docF1+0.011)、8 已饱和；4=原基线
 
 PRED_SAPBERT="pred_${PREFIX}_sapbert.jsonl"
 PRED_GATE="pred_${PREFIX}_gate.jsonl"
@@ -58,7 +59,7 @@ echo "  输入     : $INPUT"
 echo "  hp.obo   : $OBO"
 echo "  前缀     : $PREFIX  →  $PRED_SAPBERT / $PRED_GATE"
 echo "  SapBERT阈值: $SIM_THRESHOLD   索引: $INDEX_DIR"
-echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER   距离阈值: $ROUTE_MAX_DIST"
+echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER   距离阈值: $ROUTE_MAX_DIST   候选ngram: $CAND_MAX_NGRAM"
 echo "  HF_ENDPOINT: $HF_ENDPOINT"
 echo "=================================================="
 
@@ -90,13 +91,14 @@ fi
 
 # —— 步骤 1：子任务1 SapBERT 识别 ——
 echo ""
-echo ">>> [1/3] 子任务1：SapBERT 识别 → $PRED_SAPBERT"
+echo ">>> [1/3] 子任务1：SapBERT 识别 → $PRED_SAPBERT（候选 ngram≤$CAND_MAX_NGRAM）"
 python scripts/s1_identify/baseline_sapbert.py \
     --input "$INPUT" \
     --obo   "$OBO" \
     --index-dir "$INDEX_DIR" \
     --out   "$PRED_SAPBERT" \
     --sim-threshold "$SIM_THRESHOLD" \
+    --cand-max-ngram "$CAND_MAX_NGRAM" \
     --fp16
 
 # —— 步骤 2：子任务2 门控式归属 ——
