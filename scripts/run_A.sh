@@ -41,6 +41,7 @@ INDEX_DIR="${INDEX_DIR:-outputs/sapbert}"
 CTX_WINDOW="${CTX_WINDOW:-120}"   # LLM 门控上下文窗口字符数（dev 扫描：240 最优，>240 反降）
 THINK="${THINK:-0}"               # 1=开思考模式（更准更慢；历史 0.6006 疑为此配置）
 FILTER="${FILTER:-0}"             # 1=过滤口径（真门控，dev 贪心240 最优 0.5848；0=旧交集口径）
+ROUTE_MAX_DIST="${ROUTE_MAX_DIST:-0}"  # 方法1 距离阈值：表型离最近患者>此字符数则判NONE(砍背景FP)；须 FILTER=1；0=不启用，dev 最优 800(→0.6025)
 
 PRED_SAPBERT="pred_${PREFIX}_sapbert.jsonl"
 PRED_GATE="pred_${PREFIX}_gate.jsonl"
@@ -57,7 +58,7 @@ echo "  输入     : $INPUT"
 echo "  hp.obo   : $OBO"
 echo "  前缀     : $PREFIX  →  $PRED_SAPBERT / $PRED_GATE"
 echo "  SapBERT阈值: $SIM_THRESHOLD   索引: $INDEX_DIR"
-echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER"
+echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER   距离阈值: $ROUTE_MAX_DIST"
 echo "  HF_ENDPOINT: $HF_ENDPOINT"
 echo "=================================================="
 
@@ -100,11 +101,16 @@ python scripts/s1_identify/baseline_sapbert.py \
 
 # —— 步骤 2：子任务2 门控式归属 ——
 echo ""
-echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK，过滤 $FILTER）"
+echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK，过滤 $FILTER，距离阈值 $ROUTE_MAX_DIST）"
 GATE_ARGS=(--input "$INPUT" --pred "$PRED_SAPBERT" --out "$PRED_GATE"
            --gate-only --context-window "$CTX_WINDOW")
 [ "$THINK" = "1" ]  && GATE_ARGS+=(--think)
 [ "$FILTER" = "1" ] && GATE_ARGS+=(--filter-mode)
+# 方法1 距离阈值（dev 最优 800）：只在过滤口径下生效，脚本层先拦，避免白跑一趟识别
+if [ "$ROUTE_MAX_DIST" != "0" ]; then
+  [ "$FILTER" = "1" ] || { echo "❌ ROUTE_MAX_DIST 须与 FILTER=1 同开（距离阈值只在过滤口径下生效）。"; exit 1; }
+  GATE_ARGS+=(--route-max-dist "$ROUTE_MAX_DIST")
+fi
 python scripts/s2_associate/associate_llm.py "${GATE_ARGS[@]}"
 
 # —— 步骤 3：提交前自检 ——
