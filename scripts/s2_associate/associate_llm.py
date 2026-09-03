@@ -215,6 +215,16 @@ def gate_assoc(base_assoc, llm_route):
     return out
 
 
+def filter_assoc(doc, entities, assign):
+    """真·门控（过滤口径）= LLM 只决定 keep/drop，留下的实体全部路由还给就近。
+       与 gate_assoc（交集口径）的区别：彻底丢弃 LLM「挂给哪个患者」的意见，只用它
+       「没判 NONE」这一条 keep 信号。因此不会出现「就近路由到 P1、LLM 却说 P2 →
+       交集为空 → 该实体双杀蒸发」——这个双杀专砍多患者篇里的小患者、系统性压低 macF1。
+       assign 里有键(=LLM 判给了某真实患者) 即 keep；判 NONE/编造ID/漏行 → drop。"""
+    kept = [e for i, e in enumerate(entities, 1) if assign.get(i) is not None]
+    return associate(doc, kept)
+
+
 # ----------------------------- 主流程 -----------------------------
 
 def main():
@@ -229,10 +239,17 @@ def main():
     ap.add_argument("--think", action="store_true", help="开 Qwen3 思考模式（更准但慢很多、更耗卡时）")
     ap.add_argument("--gate-only", action="store_true",
                     help="门控式（推荐）：LLM 只做 keep/drop，路由还给就近 = 就近∩LLM保留集")
+    ap.add_argument("--filter-mode", action="store_true",
+                    help="真门控（过滤口径）：LLM 只 keep/drop，留下的全交就近路由；"
+                         "丢弃 LLM 路由意见、消除双杀 bug。须与 --gate-only 同开")
     ap.add_argument("--no-fallback", action="store_true", help="解析失败也不回退就近归属（默认回退）")
     ap.add_argument("--limit-docs", type=int, default=0, help="只处理前 N 篇（冒烟用）；0=全量")
     ap.add_argument("--show-prompt", action="store_true", help="打印首篇 prompt 与回复，便于核对")
     args = ap.parse_args()
+
+    if args.filter_mode and not args.gate_only:
+        print("❌ --filter-mode 须与 --gate-only 同开（它是门控式的一种口径）。已中止。")
+        sys.exit(2)
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -245,7 +262,10 @@ def main():
     device = torch.device("cuda:0")
     print("使用 GPU :", torch.cuda.get_device_name(0))
     if args.gate_only:
-        print("模式     : 门控式（LLM 只做 keep/drop，路由还给就近）")
+        if args.filter_mode:
+            print("模式     : 真门控/过滤口径（LLM 只 keep/drop，留下的全交就近路由）")
+        else:
+            print("模式     : 门控式/交集口径（就近 ∩ LLM 保留集）")
 
     # 读两个文件并按 pmc_id join
     inputs = [json.loads(l) for l in open(args.input, encoding="utf-8") if l.strip()]
@@ -322,10 +342,15 @@ def main():
                 if n_parsed < len(entities):    # 有序号没被判到（截断/漏行）→ 那些实体默认 NONE
                     n_shortfall += 1
                 if args.gate_only:
-                    # LLM 只当门控：就近路由(path) ∩ LLM 保留集(keep)，多患者不被误路由
-                    route = llm_routing(entities, assign, valid_pids)
-                    base = associate(d, entities)
-                    assoc = gate_assoc(base, route)
+                    if args.filter_mode:
+                        # 真门控（过滤口径）：LLM 只 keep/drop，留下的全交就近路由，
+                        # 丢弃 LLM「挂给谁」的意见 → 消除双杀 bug（就近≠LLM 时不再蒸发）
+                        assoc = filter_assoc(d, entities, assign)
+                    else:
+                        # 交集口径：就近路由(path) ∩ LLM 保留集(keep)，多患者不被误路由
+                        route = llm_routing(entities, assign, valid_pids)
+                        base = associate(d, entities)
+                        assoc = gate_assoc(base, route)
                 else:
                     assoc = assoc_from_assignments(entities, assign, valid_pids)
 
