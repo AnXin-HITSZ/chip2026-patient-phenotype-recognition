@@ -192,11 +192,16 @@ def build_prompt_whole(doc, entities, global_text, window):
     L.append("")
     L.append("Below is a numbered list of phenotype mentions found in the article "
              "(each with a short surrounding context to locate it).")
-    L.append("For EACH, decide which individual it describes and answer with that "
-             "individual's ID. If it belongs to NONE of the listed individuals "
-             "(general disease background, a definition, a method, another cohort/"
-             "reference, or the text says it is normal/absent/ruled-out for the "
-             "patient), answer NONE.")
+    L.append("For EACH phenotype, apply this test: does the article state that THIS "
+             "specific individual actually presents, exhibits, or was diagnosed with "
+             "this phenotype in their own clinical case?")
+    L.append("  - If YES, answer that individual's ID.")
+    L.append("  - If the phenotype appears only as the disease/topic under study, a "
+             "definition, background, a diagnostic criterion, another cohort's or a "
+             "reference's finding, or is stated to be normal/absent/ruled-out for the "
+             "individual, then it does NOT describe any listed individual -- answer NONE.")
+    L.append("When unsure whether a phenotype is truly a finding for one of these "
+             "individuals versus general disease context, answer NONE.")
     L.append("")
     L.append("Phenotype mentions:")
     for i, e in enumerate(entities, 1):
