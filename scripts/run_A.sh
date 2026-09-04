@@ -43,6 +43,7 @@ THINK="${THINK:-0}"               # 1=开思考模式（更准更慢；历史 0.
 FILTER="${FILTER:-0}"             # 1=过滤口径（真门控，dev 贪心240 最优 0.5848；0=旧交集口径）
 ROUTE_MAX_DIST="${ROUTE_MAX_DIST:-0}"  # 方法1 距离阈值：表型离最近患者>此字符数则判NONE(砍背景FP)；须 FILTER=1；0=不启用，dev 最优 800(→0.6025)
 CAND_MAX_NGRAM="${CAND_MAX_NGRAM:-4}"  # A1：SapBERT 候选最多几个词元；dev 实测 6 最优(保底menF1+0.007/docF1+0.011)、8 已饱和；4=原基线
+WHOLE_ARTICLE="${WHOLE_ARTICLE:-0}"    # 1=整篇分配口径：喂整篇全文+患者名册offset，LLM 全权判挂谁/NONE(不走就近)。诊断 dev 0.5869→0.6011、路由0.84≫就近0.63。与门控(FILTER/ROUTE_MAX_DIST)互斥。验证/复现须 CTX_WINDOW=160。0=门控口径
 
 PRED_SAPBERT="pred_${PREFIX}_sapbert.jsonl"
 PRED_GATE="pred_${PREFIX}_gate.jsonl"
@@ -59,7 +60,7 @@ echo "  输入     : $INPUT"
 echo "  hp.obo   : $OBO"
 echo "  前缀     : $PREFIX  →  $PRED_SAPBERT / $PRED_GATE"
 echo "  SapBERT阈值: $SIM_THRESHOLD   索引: $INDEX_DIR"
-echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER   距离阈值: $ROUTE_MAX_DIST   候选ngram: $CAND_MAX_NGRAM"
+echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER   距离阈值: $ROUTE_MAX_DIST   候选ngram: $CAND_MAX_NGRAM   整篇分配: $WHOLE_ARTICLE"
 echo "  HF_ENDPOINT: $HF_ENDPOINT"
 echo "=================================================="
 
@@ -101,17 +102,27 @@ python scripts/s1_identify/baseline_sapbert.py \
     --cand-max-ngram "$CAND_MAX_NGRAM" \
     --fp16
 
-# —— 步骤 2：子任务2 门控式归属 ——
+# —— 步骤 2：子任务2 归属（门控口径 或 整篇分配口径）——
 echo ""
-echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK，过滤 $FILTER，距离阈值 $ROUTE_MAX_DIST）"
-GATE_ARGS=(--input "$INPUT" --pred "$PRED_SAPBERT" --out "$PRED_GATE"
-           --gate-only --context-window "$CTX_WINDOW")
-[ "$THINK" = "1" ]  && GATE_ARGS+=(--think)
-[ "$FILTER" = "1" ] && GATE_ARGS+=(--filter-mode)
-# 方法1 距离阈值（dev 最优 800）：只在过滤口径下生效，脚本层先拦，避免白跑一趟识别
-if [ "$ROUTE_MAX_DIST" != "0" ]; then
-  [ "$FILTER" = "1" ] || { echo "❌ ROUTE_MAX_DIST 须与 FILTER=1 同开（距离阈值只在过滤口径下生效）。"; exit 1; }
-  GATE_ARGS+=(--route-max-dist "$ROUTE_MAX_DIST")
+if [ "$WHOLE_ARTICLE" = "1" ]; then
+  # 整篇分配：LLM 全权判挂给谁/NONE，不走就近。与门控互斥，故 FILTER/ROUTE_MAX_DIST 不可同开。
+  [ "$FILTER" = "0" ] || { echo "❌ WHOLE_ARTICLE=1 与 FILTER 互斥（一个整篇全权分配、一个门控式）。二选一。"; exit 1; }
+  [ "$ROUTE_MAX_DIST" = "0" ] || { echo "❌ WHOLE_ARTICLE=1 不能与 ROUTE_MAX_DIST 同开（距离阈值只属门控口径）。"; exit 1; }
+  echo ">>> [2/3] 子任务2：Qwen3-8B 整篇分配 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK；喂整篇全文+患者offset名册，LLM全权判挂谁/NONE）"
+  GATE_ARGS=(--input "$INPUT" --pred "$PRED_SAPBERT" --out "$PRED_GATE"
+             --whole-article --context-window "$CTX_WINDOW")
+  [ "$THINK" = "1" ] && GATE_ARGS+=(--think)
+else
+  echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK，过滤 $FILTER，距离阈值 $ROUTE_MAX_DIST）"
+  GATE_ARGS=(--input "$INPUT" --pred "$PRED_SAPBERT" --out "$PRED_GATE"
+             --gate-only --context-window "$CTX_WINDOW")
+  [ "$THINK" = "1" ]  && GATE_ARGS+=(--think)
+  [ "$FILTER" = "1" ] && GATE_ARGS+=(--filter-mode)
+  # 方法1 距离阈值（dev 最优 800）：只在过滤口径下生效，脚本层先拦，避免白跑一趟识别
+  if [ "$ROUTE_MAX_DIST" != "0" ]; then
+    [ "$FILTER" = "1" ] || { echo "❌ ROUTE_MAX_DIST 须与 FILTER=1 同开（距离阈值只在过滤口径下生效）。"; exit 1; }
+    GATE_ARGS+=(--route-max-dist "$ROUTE_MAX_DIST")
+  fi
 fi
 python scripts/s2_associate/associate_llm.py "${GATE_ARGS[@]}"
 

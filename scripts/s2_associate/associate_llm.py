@@ -69,8 +69,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from baseline_dict import build_global, associate  # noqa: E402
 
 MODEL_NAME = "Qwen/Qwen3-8B"
-# 解析 LLM 每行 "序号: 患者ID/NONE"。允许 ':' 或 '.' 或 ')' 作分隔，容忍前导空白/编号符
-LINE_RE = re.compile(r"^\s*[#\-\*]?\s*(\d+)\s*[:\.\)]\s*([A-Za-z0-9_\-]+)")
+# 解析 LLM 每行 "序号: 患者ID/NONE"。允许 ':' 或 '.' 或 ')' 作分隔，容忍前导空白/编号符。
+# ID 字符类含 '.'/':'：患者 ID 常为 "OII.1"/"OII:9"/"OCSA108.01" 这类代:序号记法，
+# 早期只含 '-' 会把 "OII:9" 截成 "OII"→非法→误判 NONE 丢弃（dev/A 榜多篇受影响，2026-09-04 修）。
+LINE_RE = re.compile(r"^\s*[#\-\*]?\s*(\d+)\s*[:\.\)]\s*([A-Za-z0-9_\.\:\-]+)")
 
 
 # ----------------------------- 章节定位 -----------------------------
@@ -106,6 +108,18 @@ def patient_roster(doc):
         if ms:
             rep = max((m.get("text", "") for m in ms), key=len)
         out.append((p["patient_id"], rep))
+    return out
+
+
+def full_roster(doc):
+    """整篇分配口径用：[(pid, rep, [(text, offset), ...])]，rep=最长 mention，
+       并带该患者**全部** mention 的原文+offset，供 LLM 在整篇里精确定位每个个体。"""
+    out = []
+    for p in doc.get("patient", []):
+        ms = p.get("mention", [])
+        rep = max((m.get("text", "") for m in ms), key=len) if ms else ""
+        mm = [(" ".join((m.get("text", "") or "").split()), m.get("offset", -1)) for m in ms]
+        out.append((p["patient_id"], " ".join(rep.split()), mm))
     return out
 
 
@@ -152,6 +166,52 @@ def build_prompt(doc, entities, global_text, sec_idx, window):
     lines.append("1: %s" % (roster[0][0] if roster else "O1"))
     lines.append("2: NONE")
     return "\n".join(lines), valid_pids
+
+
+def build_prompt_whole(doc, entities, global_text, window):
+    """整篇分配口径的 prompt：喂**整篇 full_text** + 患者名册(含全部 mention 原文+offset)，
+       替代 build_prompt 的「±window 上下文 + 最长 mention」。返回 (prompt_str, valid_pids)。
+       诊断实测(_route_llm.py，dev)：整篇+名册offset 让 LLM 全权路由 macF1 由旧崩盘(0.337)
+       翻正到 0.483、Score 0.5869→0.6011；路由准确率 0.84≫就近 0.63。"""
+    roster = full_roster(doc)
+    valid_pids = {pid for pid, _, _ in roster}
+
+    L = []
+    L.append("You are a clinical NLP expert reading a FULL biomedical case report. "
+             "The article often describes several individuals (patients and/or relatives).")
+    L.append("")
+    L.append("=== FULL ARTICLE TEXT (char offsets start at 0) ===")
+    L.append(global_text)
+    L.append("=== END ARTICLE ===")
+    L.append("")
+    L.append("Individuals described in this article (ID = how we label them; the quoted "
+             "phrases are how they are referred to in the text, with char offset):")
+    for pid, rep, mm in roster:
+        refs = "; ".join('"%s"@%d' % (t, o) for t, o in mm[:6] if t)
+        L.append('  %s  (e.g. "%s")  refs: %s' % (pid, rep[:80], refs))
+    L.append("")
+    L.append("Below is a numbered list of phenotype mentions found in the article "
+             "(each with a short surrounding context to locate it).")
+    L.append("For EACH, decide which individual it describes and answer with that "
+             "individual's ID. If it belongs to NONE of the listed individuals "
+             "(general disease background, a definition, a method, another cohort/"
+             "reference, or the text says it is normal/absent/ruled-out for the "
+             "patient), answer NONE.")
+    L.append("")
+    L.append("Phenotype mentions:")
+    for i, e in enumerate(entities, 1):
+        off = e.get("offset", 0)
+        length = e.get("length", 0)
+        left = max(0, off - window)
+        right = min(len(global_text), off + length + window)
+        ctx = " ".join(global_text[left:right].split())
+        men = " ".join((e.get("text") or "").split())
+        L.append('  %d. "%s" @char%d | context: ...%s...' % (i, men, off, ctx))
+    L.append("")
+    L.append("Output EXACTLY one line per phenotype, in order, in the form:")
+    L.append("<number>: <individual ID or NONE>")
+    L.append("No explanations, no extra text.")
+    return "\n".join(L), valid_pids
 
 
 # ----------------------------- 输出解析 + 聚合 -----------------------------
@@ -240,6 +300,10 @@ def main():
     ap.add_argument("--think", action="store_true", help="开 Qwen3 思考模式（更准但慢很多、更耗卡时）")
     ap.add_argument("--gate-only", action="store_true",
                     help="门控式（推荐）：LLM 只做 keep/drop，路由还给就近 = 就近∩LLM保留集")
+    ap.add_argument("--whole-article", action="store_true",
+                    help="整篇分配口径：喂整篇全文 + 患者名册(含mention offset)，LLM 全权判"
+                         "挂给谁/NONE（不走就近）。诊断实测 dev 0.5869→0.6011、macF1 0.437→0.483、"
+                         "路由 0.84≫就近 0.63。与 --gate-only 互斥。默认关。")
     ap.add_argument("--filter-mode", action="store_true",
                     help="真门控（过滤口径）：LLM 只 keep/drop，留下的全交就近路由；"
                          "丢弃 LLM 路由意见、消除双杀 bug。须与 --gate-only 同开")
@@ -257,6 +321,9 @@ def main():
     if args.route_max_dist and not args.filter_mode:
         print("❌ --route-max-dist 距离阈值只在过滤口径下生效，须与 --filter-mode 同开。已中止。")
         sys.exit(2)
+    if args.whole_article and args.gate_only:
+        print("❌ --whole-article 与 --gate-only 互斥（一个是整篇全权分配、一个是门控式）。已中止。")
+        sys.exit(2)
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -268,6 +335,8 @@ def main():
         sys.exit(2)
     device = torch.device("cuda:0")
     print("使用 GPU :", torch.cuda.get_device_name(0))
+    if args.whole_article:
+        print("模式     : 整篇分配（喂整篇全文+患者名册offset，LLM 全权判挂谁/NONE，不走就近）")
     if args.gate_only:
         if args.filter_mode:
             print("模式     : 真门控/过滤口径（LLM 只 keep/drop，留下的全交就近路由）")
@@ -309,7 +378,12 @@ def main():
         elif not entities:
             assoc = [{"patient_id": pid, "phenotype": []} for pid in roster_pids]
         else:
-            prompt, valid_pids = build_prompt(d, entities, G, sec_idx, args.context_window)
+            if args.whole_article:
+                prompt, valid_pids = build_prompt_whole(
+                    d, entities, G, args.context_window)
+            else:
+                prompt, valid_pids = build_prompt(
+                    d, entities, G, sec_idx, args.context_window)
             # 每行 "<序号>: <患者ID或NONE>"，多患者时患者ID(如 OII.1)更长，按每行 ~12 token
             # + 128 余量估。贪心解码遇 EOS 自然停，故对已完整输出零成本，只兜住长文档不被截断。
             mnt = args.max_new_tokens or (len(entities) * 12 + 128)
