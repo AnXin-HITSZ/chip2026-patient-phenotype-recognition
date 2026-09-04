@@ -168,13 +168,11 @@ def build_prompt(doc, entities, global_text, sec_idx, window):
     return "\n".join(lines), valid_pids
 
 
-def build_prompt_whole(doc, entities, global_text, window, few_shot=False):
+def build_prompt_whole(doc, entities, global_text, window):
     """整篇分配口径的 prompt：喂**整篇 full_text** + 患者名册(含全部 mention 原文+offset)，
        替代 build_prompt 的「±window 上下文 + 最长 mention」。返回 (prompt_str, valid_pids)。
        诊断实测(_route_llm.py，dev)：整篇+名册offset 让 LLM 全权路由 macF1 由旧崩盘(0.337)
-       翻正到 0.483、Score 0.5869→0.6011；路由准确率 0.84≫就近 0.63。
-       few_shot=True：判据后加 3 例合成对比样例(全虚构、零泄漏)，教「同词 topic vs finding」
-       与「综合征伞名 vs 组成体征」，打 MODY 型残留误留（正向测试 zero-shot 碰不动的语义核）。"""
+       翻正到 0.483、Score 0.5869→0.6011；路由准确率 0.84≫就近 0.63。"""
     roster = full_roster(doc)
     valid_pids = {pid for pid, _, _ in roster}
 
@@ -204,28 +202,6 @@ def build_prompt_whole(doc, entities, global_text, window, few_shot=False):
              "individual, then it does NOT describe any listed individual -- answer NONE.")
     L.append("When unsure whether a phenotype is truly a finding for one of these "
              "individuals versus general disease context, answer NONE.")
-    if few_shot:
-        L.append("")
-        L.append("Worked examples (these ONLY illustrate the test above -- do NOT copy "
-                 "them, and do NOT add any of them to your answer):")
-        L.append('  Article A studies Wilson disease. Text: "...Wilson disease is a '
-                 'disorder of copper metabolism. Patient 1, a 9-year-old boy, presented '
-                 'with tremor and hepatomegaly..."')
-        L.append('    - "Wilson disease" -> NONE  (it names the disorder under study, '
-                 "not a finding of Patient 1's own case)")
-        L.append('    - "tremor" -> P1  (Patient 1 actually presented with it)')
-        L.append('    - "hepatomegaly" -> P1  '
-                 "(also a finding in Patient 1's own case)")
-        L.append('  Article B (a DIFFERENT article). Text: "...Patient 2 was diagnosed '
-                 'with Wilson disease after developing Kayser-Fleischer rings..."')
-        L.append('    - "Wilson disease" -> P2  (here it is '
-                 "Patient 2's own diagnosis, not the study topic; SAME term as "
-                 "Article A, opposite answer)")
-        L.append('  Article C studies a family with Ellis-van Creveld syndrome. Text: '
-                 '"...The syndrome causes skeletal defects. Patient 3 showed polydactyly..."')
-        L.append('    - "Ellis-van Creveld syndrome" -> NONE  (the umbrella syndrome name '
-                 "/ study subject, not a per-person finding)")
-        L.append('    - "polydactyly" -> P3  (a specific sign Patient 3 exhibits)')
     L.append("")
     L.append("Phenotype mentions:")
     for i, e in enumerate(entities, 1):
@@ -333,10 +309,6 @@ def main():
                     help="整篇分配口径：喂整篇全文 + 患者名册(含mention offset)，LLM 全权判"
                          "挂给谁/NONE（不走就近）。诊断实测 dev 0.5869→0.6011、macF1 0.437→0.483、"
                          "路由 0.84≫就近 0.63。与 --gate-only 互斥。默认关。")
-    ap.add_argument("--few-shot", action="store_true",
-                    help="整篇分配下，判据后加 3 例合成对比样例(全虚构、零泄漏)：教「同词 topic vs "
-                         "finding」与「综合征伞名 vs 组成体征」，打 MODY 型残留误留。仅 --whole-article "
-                         "生效。默认关。")
     ap.add_argument("--filter-mode", action="store_true",
                     help="真门控（过滤口径）：LLM 只 keep/drop，留下的全交就近路由；"
                          "丢弃 LLM 路由意见、消除双杀 bug。须与 --gate-only 同开")
@@ -357,9 +329,6 @@ def main():
     if args.whole_article and args.gate_only:
         print("❌ --whole-article 与 --gate-only 互斥（一个是整篇全权分配、一个是门控式）。已中止。")
         sys.exit(2)
-    if args.few_shot and not args.whole_article:
-        print("❌ --few-shot 只在 --whole-article 整篇分配口径下生效，须与之同开。已中止。")
-        sys.exit(2)
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -372,8 +341,7 @@ def main():
     device = torch.device("cuda:0")
     print("使用 GPU :", torch.cuda.get_device_name(0))
     if args.whole_article:
-        print("模式     : 整篇分配（喂整篇全文+患者名册offset，LLM 全权判挂谁/NONE，不走就近）"
-              + ("  + few-shot（3 例合成对比样例）" if args.few_shot else ""))
+        print("模式     : 整篇分配（喂整篇全文+患者名册offset，LLM 全权判挂谁/NONE，不走就近）")
     if args.gate_only:
         if args.filter_mode:
             print("模式     : 真门控/过滤口径（LLM 只 keep/drop，留下的全交就近路由）")
@@ -417,7 +385,7 @@ def main():
         else:
             if args.whole_article:
                 prompt, valid_pids = build_prompt_whole(
-                    d, entities, G, args.context_window, few_shot=args.few_shot)
+                    d, entities, G, args.context_window)
             else:
                 prompt, valid_pids = build_prompt(
                     d, entities, G, sec_idx, args.context_window)

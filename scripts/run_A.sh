@@ -44,7 +44,6 @@ FILTER="${FILTER:-0}"             # 1=过滤口径（真门控，dev 贪心240 �
 ROUTE_MAX_DIST="${ROUTE_MAX_DIST:-0}"  # 方法1 距离阈值：表型离最近患者>此字符数则判NONE(砍背景FP)；须 FILTER=1；0=不启用，dev 最优 800(→0.6025)
 CAND_MAX_NGRAM="${CAND_MAX_NGRAM:-4}"  # A1：SapBERT 候选最多几个词元；dev 实测 6 最优(保底menF1+0.007/docF1+0.011)、8 已饱和；4=原基线
 WHOLE_ARTICLE="${WHOLE_ARTICLE:-0}"    # 1=整篇分配口径：喂整篇全文+患者名册offset，LLM 全权判挂谁/NONE(不走就近)。诊断 dev 0.5869→0.6011、路由0.84≫就近0.63。与门控(FILTER/ROUTE_MAX_DIST)互斥。验证/复现须 CTX_WINDOW=160。0=门控口径
-FEW_SHOT="${FEW_SHOT:-0}"              # 1=整篇分配下判据后加 3 例合成对比 few-shot(全虚构、零泄漏)：教同词 topic-vs-finding + 综合征伞名，打 MODY 型残留误留。须 WHOLE_ARTICLE=1。0=关
 
 PRED_SAPBERT="pred_${PREFIX}_sapbert.jsonl"
 PRED_GATE="pred_${PREFIX}_gate.jsonl"
@@ -61,7 +60,7 @@ echo "  输入     : $INPUT"
 echo "  hp.obo   : $OBO"
 echo "  前缀     : $PREFIX  →  $PRED_SAPBERT / $PRED_GATE"
 echo "  SapBERT阈值: $SIM_THRESHOLD   索引: $INDEX_DIR"
-echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER   距离阈值: $ROUTE_MAX_DIST   候选ngram: $CAND_MAX_NGRAM   整篇分配: $WHOLE_ARTICLE   few-shot: $FEW_SHOT"
+echo "  门控窗口 : $CTX_WINDOW   思考模式: $THINK   过滤口径: $FILTER   距离阈值: $ROUTE_MAX_DIST   候选ngram: $CAND_MAX_NGRAM   整篇分配: $WHOLE_ARTICLE"
 echo "  HF_ENDPOINT: $HF_ENDPOINT"
 echo "=================================================="
 
@@ -113,9 +112,7 @@ if [ "$WHOLE_ARTICLE" = "1" ]; then
   GATE_ARGS=(--input "$INPUT" --pred "$PRED_SAPBERT" --out "$PRED_GATE"
              --whole-article --context-window "$CTX_WINDOW")
   [ "$THINK" = "1" ] && GATE_ARGS+=(--think)
-  [ "$FEW_SHOT" = "1" ] && GATE_ARGS+=(--few-shot)
 else
-  [ "$FEW_SHOT" = "0" ] || { echo "❌ FEW_SHOT=1 只在整篇分配(WHOLE_ARTICLE=1)下生效，门控口径不支持。二选一。"; exit 1; }
   echo ">>> [2/3] 子任务2：Qwen3-8B 门控式归属 → $PRED_GATE（窗口 $CTX_WINDOW，思考 $THINK，过滤 $FILTER，距离阈值 $ROUTE_MAX_DIST）"
   GATE_ARGS=(--input "$INPUT" --pred "$PRED_SAPBERT" --out "$PRED_GATE"
              --gate-only --context-window "$CTX_WINDOW")
